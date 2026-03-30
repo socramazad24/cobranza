@@ -1,8 +1,19 @@
 // src/config/supabaseClient.js
 const { createClient } = require('@supabase/supabase-js');
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+let supabase;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
-module.exports = supabase;
+const getSupabase = () => {
+  if (!supabase) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_KEY;
+
+    console.log('SUPABASE_URL:', url ? '✅' : '❌ undefined');
+    console.log('SUPABASE_KEY:', key ? '✅' : '❌ undefined');
+
+    supabase = createClient(url, key);
+  }
+  return supabase;
+};
+
+module.exports = getSupabase;

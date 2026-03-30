@@ -1,8 +1,9 @@
 // src/controllers/authController.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // ── LOGIN ─────────────────────────────────────────────────────
 const login = async (req, res) => {
+    const supabase = getSupabase();
   const { email, password } = req.body;
   const { data, error } = await supabase.auth.signInWithPassword({
     email,
@@ -31,6 +32,7 @@ const login = async (req, res) => {
 
 // ── CREAR COBRADOR ────────────────────────────────────────────
 const createCobrador = async (req, res) => {
+    const supabase = getSupabase();
   const { nombre, email, password, rutas_ids } = req.body;
 
   if (!nombre || !email || !password || !rutas_ids?.length) {
@@ -80,6 +82,7 @@ const createCobrador = async (req, res) => {
 
 // ── GET COBRADORES ────────────────────────────────────────────
 const getCobradores = async (req, res) => {
+    const supabase = getSupabase();
   try {
     const { data, error } = await supabase
       .from('usuarios')

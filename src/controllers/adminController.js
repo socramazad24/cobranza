@@ -1,8 +1,9 @@
 // src/controllers/adminController.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // ── GET ALL USERS ─────────────────────────────────────────────
 const getAllUsers = async (req, res) => {
+    const supabase = getSupabase();
   try {
     const { data, error } = await supabase
       .from('usuarios')
@@ -18,6 +19,7 @@ const getAllUsers = async (req, res) => {
 
 // ── UPDATE USER ───────────────────────────────────────────────
 const updateUser = async (req, res) => {
+    const supabase = getSupabase();
   const { id } = req.params;
   const { nombre, rol } = req.body;
 
@@ -32,6 +34,7 @@ const updateUser = async (req, res) => {
 
 // ── DELETE USER ───────────────────────────────────────────────
 const deleteUser = async (req, res) => {
+    const supabase = getSupabase();
   const { id } = req.params;
 
   try {

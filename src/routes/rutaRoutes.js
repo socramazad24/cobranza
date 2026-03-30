@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 const { verifyToken } = require('../middlewares/authMiddleware');
 
 router.get('/', verifyToken, async (req, res) => {
+    const supabase = getSupabase();
   try {
     const { data, error } = await supabase
       .from('rutas')
@@ -19,6 +20,8 @@ router.get('/', verifyToken, async (req, res) => {
 
 // ✅ Agrega esta ruta
 router.get('/cobrador/:id', verifyToken, async (req, res) => {
+  const supabase = getSupabase();
+
   try {
     const { id } = req.params;
 
@@ -38,6 +41,7 @@ router.get('/cobrador/:id', verifyToken, async (req, res) => {
 
 // ✅ Actualizar rutas de un cobrador (admin)
 router.put('/cobrador/:id', verifyToken, async (req, res) => {
+    const supabase = getSupabase();
   try {
     if (req.user.rol !== 'admin') {
       return res.status(403).json({ error: 'Acceso denegado' });

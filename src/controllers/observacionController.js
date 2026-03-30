@@ -1,8 +1,9 @@
 // src/controllers/observacionController.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // Crear una observación
 const createObservacion = async (req, res) => {
+    const supabase = getSupabase();
     const { tipo, referencia_id, descripcion } = req.body;
     const cobrador_id = req.user.id;
 
@@ -23,6 +24,7 @@ const createObservacion = async (req, res) => {
 
 // Listar observaciones - SIN JOIN de Supabase, consulta manual
 const getObservaciones = async (req, res) => {
+    const supabase = getSupabase();
     const { resuelta } = req.query;
 
     try {
@@ -72,6 +74,7 @@ const getObservaciones = async (req, res) => {
 
 // Resolver observación
 const resolverObservacion = async (req, res) => {
+    const supabase = getSupabase();
     const { id } = req.params;
     const admin_id = req.user.id;
 

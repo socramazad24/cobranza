@@ -1,8 +1,9 @@
 // src/controllers/expenseController.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // Registrar gasto (solo admin) con comprobante
 const registerExpense = async (req, res) => {
+    const supabase = getSupabase();
     const { tipo_gasto, valor, cobrador_id, comprobante_url } = req.body;
     const registrado_por = req.user.id;
 
@@ -27,6 +28,7 @@ const registerExpense = async (req, res) => {
 
 // Obtener gastos - admin ve todos, cobrador solo los suyos
 const getExpenses = async (req, res) => {
+        const supabase = getSupabase();
     const usuarioId = req.user.id;
     const rol = req.user.rol;
 
@@ -50,6 +52,7 @@ const getExpenses = async (req, res) => {
 
 // Subir comprobante a Supabase Storage
 const uploadComprobante = async (req, res) => {
+    const supabase = getSupabase();
     if (req.user.rol !== 'admin') {
         return res.status(403).json({ error: 'Solo el administrador puede subir comprobantes' });
     }

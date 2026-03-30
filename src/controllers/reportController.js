@@ -1,7 +1,8 @@
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // ── EXISTENTE ─────────────────────────────────────────────────
 const getResumen = async (req, res) => {
+    const supabase = getSupabase();
   try {
     const { data: totalData, error: totalError } = await supabase
       .from('prestamos')
@@ -44,6 +45,7 @@ const getResumen = async (req, res) => {
 
 // ── NUEVO ─────────────────────────────────────────────────────
 const getResumenCobrador = async (req, res) => {
+    const supabase = getSupabase();
   try {
     const userId = req.user.id;
 
@@ -104,6 +106,7 @@ const getResumenCobrador = async (req, res) => {
 
 // ── NUEVO ─────────────────────────────────────────────────────
 const getResumenGastos = async (req, res) => {
+    const supabase = getSupabase();
   try {
     if (req.user.rol !== 'admin') {
       return res.status(403).json({ error: 'Acceso denegado' });

@@ -1,8 +1,9 @@
 // src/controllers/paymentController.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // ── REGISTRAR ABONO ───────────────────────────────────────────
 const registerPayment = async (req, res) => {
+    const supabase = getSupabase();
   const { prestamo_id, monto_pagado } = req.body;
   const cobrador_id = req.user.id;
 
@@ -67,6 +68,7 @@ const registerPayment = async (req, res) => {
 
 // ── HISTORIAL DE PAGOS ────────────────────────────────────────
 const getPaymentHistory = async (req, res) => {
+    const supabase = getSupabase();
   const { prestamo_id } = req.params;
 
   const { data, error } = await supabase
@@ -81,6 +83,7 @@ const getPaymentHistory = async (req, res) => {
 
 // ── PRÉSTAMOS ACTIVOS ─────────────────────────────────────────
 const getActiveLoans = async (req, res) => {
+    const supabase = getSupabase();
   const cobrador_id = req.user.id;
   const rol         = req.user.rol;
 
@@ -118,6 +121,7 @@ const getActiveLoans = async (req, res) => {
 
 // ── RENOVAR PRÉSTAMO ──────────────────────────────────────────
 const renewLoan = async (req, res) => {
+    const supabase = getSupabase();
   const { prestamo_id, dias_plazo } = req.body;
   const cobrador_id = req.user.id;
 

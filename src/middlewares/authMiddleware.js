@@ -1,7 +1,8 @@
 // src/middlewares/authMiddleware.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 const verifyToken = async (req, res, next) => {
+    const supabase = getSupabase();
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 

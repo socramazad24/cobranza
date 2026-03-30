@@ -1,8 +1,9 @@
 // src/controllers/rutaController.js
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 // Listar todas las rutas
 const getRutas = async (req, res) => {
+    const supabase = getSupabase();
     const { data, error } = await supabase
         .from('rutas')
         .select('*')
@@ -14,6 +15,7 @@ const getRutas = async (req, res) => {
 
 // Crear una ruta nueva
 const createRuta = async (req, res) => {
+    const supabase = getSupabase();
     const { nombre, descripcion } = req.body;
 
     if (!nombre) return res.status(400).json({ error: 'El nombre es requerido' });
@@ -39,6 +41,7 @@ const createRuta = async (req, res) => {
 
 // Editar ruta
 const updateRuta = async (req, res) => {
+    const supabase = getSupabase();
     const { id } = req.params;
     const { nombre, descripcion } = req.body;
 
@@ -53,6 +56,7 @@ const updateRuta = async (req, res) => {
 
 // Eliminar ruta
 const deleteRuta = async (req, res) => {
+    const supabase = getSupabase();
     const { id } = req.params;
 
     const { error } = await supabase
@@ -66,6 +70,7 @@ const deleteRuta = async (req, res) => {
 
 // Asignar una o más rutas a un cobrador
 const asignarRutas = async (req, res) => {
+    const supabase = getSupabase();
     const { cobrador_id, ruta_ids } = req.body;
     // ruta_ids es un array de IDs: [1, 2, 3]
 
@@ -96,6 +101,7 @@ const asignarRutas = async (req, res) => {
 
 // Obtener rutas asignadas a un cobrador específico
 const getRutasCobrador = async (req, res) => {
+    const supabase = getSupabase();
     const { cobrador_id } = req.params;
 
     const { data, error } = await supabase

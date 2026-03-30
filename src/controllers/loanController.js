@@ -1,6 +1,7 @@
-const supabase = require('../config/supabaseClient');
+const getSupabase = require('../config/supabaseClient');
 
 const createLoan = async (req, res) => {
+    const supabase = getSupabase();
     const {
         cliente_nombre,
         cliente_telefono,
@@ -97,6 +98,7 @@ const createLoan = async (req, res) => {
 };
 
 const getClavos = async (req, res) => {
+    const supabase = getSupabase();
     // Clientes que tienen un préstamo activo pero no han pagado en más de 2 días
     const { data, error } = await supabase.rpc('obtener_clientes_morosos'); // Requiere crear una función en SQL en Supabase
     
