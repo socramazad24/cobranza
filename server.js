@@ -29,6 +29,7 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/rutas', rutaRoutes);
 app.use('/api/observaciones', observacionRoutes);
+app.use('/api/clients', require('./src/routes/clientsRoutes'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {

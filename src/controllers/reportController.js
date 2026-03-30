@@ -2,6 +2,7 @@ const getSupabase = require('../config/supabaseClient');
 
 // ── EXISTENTE ─────────────────────────────────────────────────
 const getResumen = async (req, res) => {
+  console.log('👤 req.user en getResumen:', req.user); // ← AGREGAR
     const supabase = getSupabase();
   try {
     const { data: totalData, error: totalError } = await supabase
@@ -45,6 +46,7 @@ const getResumen = async (req, res) => {
 
 // ── NUEVO ─────────────────────────────────────────────────────
 const getResumenCobrador = async (req, res) => {
+  console.log('👤 req.user en getResumenGastos:', req.user);
     const supabase = getSupabase();
   try {
     const userId = req.user.id;
