@@ -12,6 +12,7 @@ const paymentRoutes = require('./src/routes/paymentRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
 const rutaRoutes = require('./src/routes/rutaRoutes');
 const observacionRoutes = require('./src/routes/observacionRoutes');
+const cajaRoutes = require('./src/routes/cajaRoutes');
 
 
 const app = express();
@@ -30,6 +31,8 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/rutas', rutaRoutes);
 app.use('/api/observaciones', observacionRoutes);
 app.use('/api/clients', require('./src/routes/clientsRoutes'));
+app.use('/api/caja', cajaRoutes);
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
