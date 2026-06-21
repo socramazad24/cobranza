@@ -1,173 +1,330 @@
 const getSupabase = require('../config/supabaseClient');
 
-// ─── ADMIN: Abrir / asignar base del día a un cobrador ───────────────────────
+const toDateString = (date) => {
+  if (!date) return new Date().toISOString().split('T')[0];
+  if (typeof date === 'string' && date.length >= 10) return date.slice(0, 10);
+  return new Date(date).toISOString().split('T')[0];
+};
+
 const abrirCaja = async (req, res) => {
   const supabase = getSupabase();
-  if (req.user.rol !== 'admin')
-    return res.status(403).json({ error: 'Solo el admin puede asignar la base del día' });
+  const { cobrador_id, base_entregada, fecha } = req.body;
+  const fechaStr = toDateString(fecha);
 
-  const { cobrador_id, base_entregada, fecha, observacion } = req.body;
-  const hoy = fecha || new Date().toISOString().split('T')[0];
+  if (!cobrador_id) {
+    return res.status(400).json({ error: 'cobrador_id es requerido' });
+  }
 
-  // Upsert: si ya existe la caja del día la actualiza, si no la crea
-  const { data, error } = await supabase
-    .from('caja_diaria')
-    .upsert(
-      { cobrador_id, fecha: hoy, base_entregada, observacion, total_cobrado: 0 },
-      { onConflict: 'cobrador_id,fecha', ignoreDuplicates: false }
-    )
-    .select()
-    .single();
+  const base = Number(base_entregada);
+  if (Number.isNaN(base) || base < 0) {
+    return res.status(400).json({ error: 'base_entregada debe ser un número válido' });
+  }
 
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ message: 'Base del día registrada', caja: data });
+  try {
+    const { data: existente, error: findError } = await supabase
+      .from('caja_diaria')
+      .select('id, total_cobrado, total_entregado')
+      .eq('cobrador_id', cobrador_id)
+      .eq('fecha', fechaStr)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (existente) {
+      const totalCobrado = Number(existente.total_cobrado || 0);
+      const totalEntregado =
+        existente.total_entregado == null ? null : Number(existente.total_entregado);
+      const diferencia =
+        totalEntregado == null ? 0 : base + totalCobrado - totalEntregado;
+
+      const { error: updateError } = await supabase
+        .from('caja_diaria')
+        .update({
+          base_entregada: base,
+          diferencia,
+        })
+        .eq('id', existente.id);
+
+      if (updateError) throw updateError;
+    } else {
+      const { error: insertError } = await supabase
+        .from('caja_diaria')
+        .insert([
+          {
+            cobrador_id,
+            fecha: fechaStr,
+            base_entregada: base,
+            total_cobrado: 0,
+            total_entregado: 0,
+            diferencia: base,
+          },
+        ]);
+
+      if (insertError) throw insertError;
+    }
+
+    return res.status(201).json({ message: 'Caja abierta/actualizada correctamente' });
+  } catch (error) {
+    console.error('Error abrirCaja:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
 };
 
-// ─── ADMIN: Cerrar el día — registrar lo que entregó el cobrador ──────────────
 const cerrarCaja = async (req, res) => {
   const supabase = getSupabase();
-  if (req.user.rol !== 'admin')
-    return res.status(403).json({ error: 'Solo el admin puede cerrar la caja' });
+  const { id } = req.params;
+  const { total_entregado } = req.body;
 
-  const { id } = req.params; // id de la caja_diaria
-  const { total_entregado, observacion } = req.body;
+  const entregado = Number(total_entregado);
+  if (Number.isNaN(entregado) || entregado < 0) {
+    return res.status(400).json({ error: 'total_entregado debe ser un número válido' });
+  }
 
-  const { data, error } = await supabase
-    .from('caja_diaria')
-    .update({ total_entregado, observacion, cerrado_por: req.user.id })
-    .eq('id', id)
-    .select()
-    .single();
+  try {
+    const { data: caja, error: cajaError } = await supabase
+      .from('caja_diaria')
+      .select('id, total_cobrado, base_entregada')
+      .eq('id', id)
+      .single();
 
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'Caja cerrada correctamente', caja: data });
+    if (cajaError) throw cajaError;
+
+    const diferencia =
+      Number(caja.total_cobrado || 0) +
+      Number(caja.base_entregada || 0) -
+      entregado;
+
+    const { error: updateError } = await supabase
+      .from('caja_diaria')
+      .update({
+        total_entregado: entregado,
+        diferencia,
+      })
+      .eq('id', id);
+
+    if (updateError) throw updateError;
+
+    return res.json({ message: 'Caja cerrada correctamente' });
+  } catch (error) {
+    console.error('Error cerrarCaja:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
 };
 
-// ─── ADMIN: Ver resumen general de caja (todas las cajas de un día) ───────────
 const getResumenCajaAdmin = async (req, res) => {
   const supabase = getSupabase();
-  if (req.user.rol !== 'admin')
-    return res.status(403).json({ error: 'Acceso denegado' });
+  const fecha = toDateString(req.query.fecha);
 
-  const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+  try {
+    const { data: cajas, error: cajasError } = await supabase
+      .from('caja_diaria')
+      .select(`
+        id,
+        cobrador_id,
+        fecha,
+        base_entregada,
+        total_cobrado,
+        total_entregado,
+        diferencia,
+        usuarios:cobrador_id (
+          id,
+          nombre
+        )
+      `)
+      .eq('fecha', fecha)
+      .order('fecha', { ascending: false });
 
-  const { data, error } = await supabase
-    .from('caja_diaria')
-    .select(`
-      id, fecha, base_entregada, total_cobrado, total_entregado, observacion,
-      usuarios!caja_diaria_cobrador_id_fkey (id, nombre)
-    `)
-    .eq('fecha', fecha)
-    .order('fecha', { ascending: false });
+    if (cajasError) throw cajasError;
 
-  if (error) return res.status(400).json({ error: error.message });
+    const cajasConPagos = await Promise.all(
+      (cajas ?? []).map(async (caja) => {
+        const { data: pagos, error: pagosError } = await supabase
+          .from('pagos')
+          .select('id, prestamo_id, monto_pagado, fecha_pago, cobrador_id')
+          .eq('cobrador_id', caja.cobrador_id)
+          .gte('fecha_pago', `${fecha}T00:00:00`)
+          .lt('fecha_pago', `${fecha}T23:59:59`);
 
-  // Calcular totales para la caja del admin
-  const totalBaseEntregada = data.reduce((s, c) => s + parseFloat(c.base_entregada || 0), 0);
-  const totalCobrado       = data.reduce((s, c) => s + parseFloat(c.total_cobrado || 0), 0);
-  const totalEntregado     = data.reduce((s, c) => s + parseFloat(c.total_entregado || 0), 0);
-  const cajasAbiertas      = data.filter(c => c.total_entregado === null).length;
+        if (pagosError) throw pagosError;
 
-  // Saldo en caja del admin:
-  // Lo que entregaron los cobradores - Lo que les dio de base
-  const saldoCaja = totalEntregado - totalBaseEntregada;
+        const base = Number(caja.base_entregada || 0);
+        const cobrado = Number(caja.total_cobrado || 0);
+        const entregado =
+          caja.total_entregado == null ? null : Number(caja.total_entregado);
+        const diferencia =
+          caja.diferencia == null
+            ? base + cobrado - Number(caja.total_entregado || 0)
+            : Number(caja.diferencia);
 
-  res.json({
-    fecha,
-    cajas: data.map(c => ({
-      ...c,
-      cobrador_nombre: c.usuarios?.nombre,
-      diferencia: c.total_entregado !== null
-        ? parseFloat(c.total_entregado) - parseFloat(c.total_cobrado)
-        : null, // diferencia entre lo que entregó y lo que realmente cobró
-    })),
-    resumen: {
-      total_base_entregada: totalBaseEntregada,
-      total_cobrado:        totalCobrado,
-      total_entregado:      totalEntregado,
-      saldo_caja:           saldoCaja,
-      cajas_abiertas:       cajasAbiertas,
-    }
-  });
+        return {
+          id: caja.id,
+          usuariosid: caja.cobrador_id,
+          cobradornombre: caja.usuarios?.nombre ?? '',
+          fecha: caja.fecha,
+          baseentregada: base,
+          totalcobrado: cobrado,
+          totalentregado: entregado,
+          diferencia,
+          pagosdeldia: (pagos ?? []).map((p) => ({
+            id: p.id,
+            prestamo_id: p.prestamo_id,
+            monto_pagado: Number(p.monto_pagado || 0),
+            fecha_pago: p.fecha_pago,
+            cobrador_id: p.cobrador_id,
+          })),
+        };
+      })
+    );
+
+    const totalBaseEntregada = cajasConPagos.reduce(
+      (sum, c) => sum + Number(c.baseentregada || 0),
+      0
+    );
+    const totalCobrado = cajasConPagos.reduce(
+      (sum, c) => sum + Number(c.totalcobrado || 0),
+      0
+    );
+    const totalEntregado = cajasConPagos.reduce(
+      (sum, c) => sum + Number(c.totalentregado || 0),
+      0
+    );
+    const saldoCaja = totalBaseEntregada + totalCobrado - totalEntregado;
+
+    return res.json({
+      resumen: {
+        fecha,
+        totalbaseentregada: totalBaseEntregada,
+        totalcobrado: totalCobrado,
+        totalentregado: totalEntregado,
+        saldocaja: saldoCaja,
+        totalcobradores: cajasConPagos.length,
+      },
+      cajas: cajasConPagos,
+    });
+  } catch (error) {
+    console.error('Error getResumenCajaAdmin:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
 };
 
-// ─── ADMIN/COBRADOR: Historial de caja de un cobrador específico ──────────────
 const getHistorialCobrador = async (req, res) => {
   const supabase = getSupabase();
   const { cobrador_id } = req.params;
 
-  // Un cobrador solo puede ver su propio historial
-  if (req.user.rol !== 'admin' && req.user.id !== cobrador_id)
-    return res.status(403).json({ error: 'Acceso denegado' });
-
-  const { desde, hasta } = req.query;
-  let query = supabase
-    .from('caja_diaria')
-    .select('*')
-    .eq('cobrador_id', cobrador_id)
-    .order('fecha', { ascending: false });
-
-  if (desde) query = query.gte('fecha', desde);
-  if (hasta) query = query.lte('fecha', hasta);
-
-  const { data, error } = await query;
-  if (error) return res.status(400).json({ error: error.message });
-
-  // Enriquecer con pagos de ese día
-  const enriched = await Promise.all(data.map(async (caja) => {
-    const { data: pagos } = await supabase
-      .from('pagos')
-      .select('monto_pagado, fecha_pago, prestamos(clientes(nombre))')
+  try {
+    const { data, error } = await supabase
+      .from('caja_diaria')
+      .select(`
+        id,
+        cobrador_id,
+        fecha,
+        base_entregada,
+        total_cobrado,
+        total_entregado,
+        diferencia,
+        usuarios:cobrador_id (
+          id,
+          nombre
+        )
+      `)
       .eq('cobrador_id', cobrador_id)
-      .gte('fecha_pago', `${caja.fecha}T00:00:00`)
-      .lte('fecha_pago', `${caja.fecha}T23:59:59`);
+      .order('fecha', { ascending: false });
 
-    return {
-      ...caja,
-      pagos_del_dia: pagos || [],
-    };
-  }));
+    if (error) throw error;
 
-  res.json(enriched);
+    const historial = (data ?? []).map((caja) => ({
+      id: caja.id,
+      usuariosid: caja.cobrador_id,
+      cobradornombre: caja.usuarios?.nombre ?? '',
+      fecha: caja.fecha,
+      baseentregada: Number(caja.base_entregada || 0),
+      totalcobrado: Number(caja.total_cobrado || 0),
+      totalentregado:
+        caja.total_entregado == null ? null : Number(caja.total_entregado),
+      diferencia:
+        caja.diferencia == null ? null : Number(caja.diferencia),
+    }));
+
+    return res.json(historial);
+  } catch (error) {
+    console.error('Error getHistorialCobrador:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
 };
 
-// ─── COBRADOR: Ver su caja del día actual ─────────────────────────────────────
 const getMiCajaHoy = async (req, res) => {
   const supabase = getSupabase();
-  const hoy = new Date().toISOString().split('T')[0];
+  const cobrador_id = req.user.id;
+  const fecha = toDateString();
 
-  const { data, error } = await supabase
-    .from('caja_diaria')
-    .select('*')
-    .eq('cobrador_id', req.user.id)
-    .eq('fecha', hoy)
-    .single();
+  try {
+    const { data: caja, error: cajaError } = await supabase
+      .from('caja_diaria')
+      .select(`
+        id,
+        cobrador_id,
+        fecha,
+        base_entregada,
+        total_cobrado,
+        total_entregado,
+        diferencia
+      `)
+      .eq('cobrador_id', cobrador_id)
+      .eq('fecha', fecha)
+      .maybeSingle();
 
-  if (error && error.code !== 'PGRST116') // PGRST116 = no rows found
+    if (cajaError) throw cajaError;
+
+    const { data: pagos, error: pagosError } = await supabase
+      .from('pagos')
+      .select('id, prestamo_id, monto_pagado, fecha_pago, cobrador_id')
+      .eq('cobrador_id', cobrador_id)
+      .gte('fecha_pago', `${fecha}T00:00:00`)
+      .lt('fecha_pago', `${fecha}T23:59:59`)
+      .order('fecha_pago', { ascending: false });
+
+    if (pagosError) throw pagosError;
+
+    if (!caja) {
+      return res.json({
+        tienecaja: false,
+        fecha,
+        baseentregada: 0,
+        totalcobrado: 0,
+        totalentregado: 0,
+        diferencia: 0,
+        pagosdeldia: [],
+      });
+    }
+
+    return res.json({
+      tienecaja: true,
+      id: caja.id,
+      fecha: caja.fecha,
+      baseentregada: Number(caja.base_entregada || 0),
+      totalcobrado: Number(caja.total_cobrado || 0),
+      totalentregado:
+        caja.total_entregado == null ? 0 : Number(caja.total_entregado),
+      diferencia:
+        caja.diferencia == null ? 0 : Number(caja.diferencia),
+      pagosdeldia: (pagos ?? []).map((p) => ({
+        id: p.id,
+        prestamo_id: p.prestamo_id,
+        monto_pagado: Number(p.monto_pagado || 0),
+        fecha_pago: p.fecha_pago,
+        cobrador_id: p.cobrador_id,
+      })),
+    });
+  } catch (error) {
+    console.error('Error getMiCajaHoy:', error.message);
     return res.status(400).json({ error: error.message });
-
-  // Si no tiene caja hoy, devolver estado vacío
-  if (!data) return res.json({
-    tiene_caja: false,
-    base_entregada: 0,
-    total_cobrado: 0,
-    mensaje: 'El admin aún no ha asignado tu base del día'
-  });
-
-  // Traer pagos del día para desglose
-  const { data: pagos } = await supabase
-    .from('pagos')
-    .select('monto_pagado, fecha_pago, prestamos(clientes(nombre))')
-    .eq('cobrador_id', req.user.id)
-    .gte('fecha_pago', `${hoy}T00:00:00`)
-    .lte('fecha_pago', `${hoy}T23:59:59`)
-    .order('fecha_pago', { ascending: false });
-
-  res.json({
-    tiene_caja: true,
-    ...data,
-    pagos_del_dia: pagos || [],
-  });
+  }
 };
 
-module.exports = { abrirCaja, cerrarCaja, getResumenCajaAdmin, getHistorialCobrador, getMiCajaHoy };
+module.exports = {
+  abrirCaja,
+  cerrarCaja,
+  getResumenCajaAdmin,
+  getHistorialCobrador,
+  getMiCajaHoy,
+};

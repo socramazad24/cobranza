@@ -1,16 +1,25 @@
-// src/controllers/paymentController.js
 const getSupabase = require('../config/supabaseClient');
 
-// ── REGISTRAR ABONO ───────────────────────────────────────────
+const todayStr = () => new Date().toISOString().split('T')[0];
+
 const registerPayment = async (req, res) => {
   const supabase = getSupabase();
   const { prestamo_id, monto_pagado } = req.body;
   const cobrador_id = req.user.id;
 
+  if (!prestamo_id) {
+    return res.status(400).json({ error: 'prestamo_id es requerido' });
+  }
+
+  const montoIngresado = Number(monto_pagado);
+  if (Number.isNaN(montoIngresado) || montoIngresado <= 0) {
+    return res.status(400).json({ error: 'monto_pagado debe ser mayor a 0' });
+  }
+
   try {
     const { data: prestamo, error: fetchError } = await supabase
       .from('prestamos')
-      .select('saldo_pendiente, estado')
+      .select('id, saldo_pendiente, estado, cobrador_id')
       .eq('id', prestamo_id)
       .single();
 
@@ -22,26 +31,22 @@ const registerPayment = async (req, res) => {
       });
     }
 
-    const saldoActual = parseFloat(prestamo.saldo_pendiente);
-    const montoIngresado = parseFloat(monto_pagado);
-
-    if (montoIngresado <= 0) {
-      return res.status(400).json({
-        error: 'El monto debe ser mayor a 0',
+    if (String(prestamo.cobrador_id) !== String(cobrador_id) && req.user.rol !== 'admin') {
+      return res.status(403).json({
+        error: 'No puedes registrar pagos de un préstamo que no te pertenece',
       });
     }
+
+    const saldoActual = Number(prestamo.saldo_pendiente || 0);
 
     if (montoIngresado > saldoActual) {
       return res.status(400).json({
-        error: `El monto $${montoIngresado.toFixed(
-          0
-        )} supera el saldo pendiente de $${saldoActual.toFixed(0)}`,
-        saldo_pendiente: saldoActual,
+        error: `El monto $${montoIngresado.toFixed(0)} supera el saldo pendiente de $${saldoActual.toFixed(0)}`,
+        saldopendiente: saldoActual,
       });
     }
 
-    // Registrar pago
-    const { error: pagoError } = await supabase
+    const { data: pago, error: pagoError } = await supabase
       .from('pagos')
       .insert([
         {
@@ -49,66 +54,87 @@ const registerPayment = async (req, res) => {
           cobrador_id,
           monto_pagado: montoIngresado,
         },
-      ]);
+      ])
+      .select('*')
+      .single();
 
     if (pagoError) throw pagoError;
 
-    // Actualizar préstamo
     const nuevoSaldo = saldoActual - montoIngresado;
+    const saldoFinal = nuevoSaldo <= 0 ? 0 : nuevoSaldo;
+    const nuevoEstado = saldoFinal === 0 ? 'pagado' : 'activo';
 
-    const { error: updateError } = await supabase
+    const { error: updatePrestamoError } = await supabase
       .from('prestamos')
       .update({
-        saldo_pendiente: nuevoSaldo <= 0 ? 0 : nuevoSaldo,
-        estado: nuevoSaldo <= 0 ? 'pagado' : 'activo',
+        saldo_pendiente: saldoFinal,
+        estado: nuevoEstado,
       })
       .eq('id', prestamo_id);
 
-    if (updateError) throw updateError;
+    if (updatePrestamoError) throw updatePrestamoError;
 
-    // ── ACTUALIZAR CAJA DIARIA ───────────────────────────────
-    const hoy = new Date().toISOString().split('T')[0];
+    const fecha = todayStr();
 
-    const { data: cajaExistente } = await supabase
+    const { data: cajaExistente, error: cajaError } = await supabase
       .from('caja_diaria')
-      .select('id, total_cobrado')
+      .select('id, base_entregada, total_cobrado, total_entregado, diferencia')
       .eq('cobrador_id', cobrador_id)
-      .eq('fecha', hoy)
-      .single();
+      .eq('fecha', fecha)
+      .maybeSingle();
+
+    if (cajaError) throw cajaError;
 
     if (cajaExistente) {
-      const nuevoTotal =
-        parseFloat(cajaExistente.total_cobrado || 0) + montoIngresado;
+      const baseEntregada = Number(cajaExistente.base_entregada || 0);
+      const nuevoTotalCobrado = Number(cajaExistente.total_cobrado || 0) + montoIngresado;
+      const totalEntregado =
+        cajaExistente.total_entregado == null ? null : Number(cajaExistente.total_entregado);
+      const nuevaDiferencia =
+        totalEntregado == null ? 0 : baseEntregada + nuevoTotalCobrado - totalEntregado;
 
-      await supabase
+      const { error: updateCajaError } = await supabase
         .from('caja_diaria')
         .update({
-          total_cobrado: nuevoTotal,
+          total_cobrado: nuevoTotalCobrado,
+          diferencia: nuevaDiferencia,
         })
         .eq('id', cajaExistente.id);
+
+      if (updateCajaError) throw updateCajaError;
+    } else {
+      const { error: insertCajaError } = await supabase
+        .from('caja_diaria')
+        .insert([
+          {
+            cobrador_id,
+            fecha,
+            base_entregada: 0,
+            total_cobrado: montoIngresado,
+            total_entregado: 0,
+            diferencia: montoIngresado,
+          },
+        ]);
+
+      if (insertCajaError) throw insertCajaError;
     }
 
-    // Si no existe caja abierta para hoy,
-    // el pago queda registrado normalmente
-    // pero no se suma al cierre de caja.
-
-    res.status(201).json({
+    return res.status(201).json({
       message: 'Pago registrado',
-      saldo_restante: nuevoSaldo <= 0 ? 0 : nuevoSaldo,
-      estado: nuevoSaldo <= 0 ? 'pagado' : 'activo',
+      pago,
+      saldorestante: saldoFinal,
+      estado: nuevoEstado,
+      fecha_pago: pago?.fecha_pago ?? new Date().toISOString(),
     });
   } catch (error) {
-    console.error('❌ Error en pago:', error.message);
-    res.status(400).json({
-      error: error.message,
-    });
+    console.error('Error en pago:', error.message);
+    return res.status(400).json({ error: error.message });
   }
 };
 
-// ── HISTORIAL DE PAGOS ────────────────────────────────────────
 const getPaymentHistory = async (req, res) => {
   const supabase = getSupabase();
-  const { prestamo_id } = req.params;
+  const prestamo_id = req.params.prestamo_id || req.params.prestamoid;
 
   const { data, error } = await supabase
     .from('pagos')
@@ -117,15 +143,12 @@ const getPaymentHistory = async (req, res) => {
     .order('fecha_pago', { ascending: false });
 
   if (error) {
-    return res.status(400).json({
-      error: error.message,
-    });
+    return res.status(400).json({ error: error.message });
   }
 
-  res.json(data);
+  return res.json(data);
 };
 
-// ── PRÉSTAMOS ACTIVOS ─────────────────────────────────────────
 const getActiveLoans = async (req, res) => {
   const supabase = getSupabase();
   const cobrador_id = req.user.id;
@@ -159,7 +182,6 @@ const getActiveLoans = async (req, res) => {
     .eq('estado', 'activo')
     .order('fecha_inicio', { ascending: false });
 
-  // Admin ve todos
   if (rol !== 'admin') {
     query = query.eq('cobrador_id', cobrador_id);
   }
@@ -167,43 +189,44 @@ const getActiveLoans = async (req, res) => {
   const { data, error } = await query;
 
   if (error) {
-    return res.status(400).json({
-      error: error.message,
-    });
+    return res.status(400).json({ error: error.message });
   }
 
-  res.json(data);
+  return res.json(data);
 };
 
-// ── RENOVAR PRÉSTAMO ──────────────────────────────────────────
 const renewLoan = async (req, res) => {
   const supabase = getSupabase();
   const { prestamo_id, dias_plazo } = req.body;
   const cobrador_id = req.user.id;
 
+  if (!prestamo_id) {
+    return res.status(400).json({ error: 'prestamo_id es requerido' });
+  }
+
   try {
     const { data: prestamo, error: fetchError } = await supabase
       .from('prestamos')
-      .select('*, clientes(id)')
+      .select('id, saldo_pendiente, clientes(id)')
       .eq('id', prestamo_id)
       .single();
 
     if (fetchError) throw fetchError;
 
-    await supabase
+    const { error: updateOldLoanError } = await supabase
       .from('prestamos')
-      .update({
-        estado: 'renovado',
-      })
+      .update({ estado: 'renovado' })
       .eq('id', prestamo_id);
 
-    const nuevoMonto = parseFloat(prestamo.saldo_pendiente);
+    if (updateOldLoanError) throw updateOldLoanError;
+
+    const nuevoMonto = Number(prestamo.saldo_pendiente || 0);
     const nuevoTotal = nuevoMonto * 1.2;
-    const nuevaCuota = nuevoTotal / dias_plazo;
+    const nuevaCuota = nuevoTotal / Number(dias_plazo);
 
     const fechaInicio = new Date();
     const fechaFin = new Date();
-    fechaFin.setDate(fechaInicio.getDate() + dias_plazo);
+    fechaFin.setDate(fechaInicio.getDate() + Number(dias_plazo));
 
     const { error: newLoanError } = await supabase
       .from('prestamos')
@@ -223,15 +246,12 @@ const renewLoan = async (req, res) => {
 
     if (newLoanError) throw newLoanError;
 
-    res.status(201).json({
+    return res.status(201).json({
       message: 'Préstamo renovado exitosamente',
     });
   } catch (error) {
-    console.error('❌ Error al renovar:', error.message);
-
-    res.status(400).json({
-      error: error.message,
-    });
+    console.error('Error al renovar:', error.message);
+    return res.status(400).json({ error: error.message });
   }
 };
 
