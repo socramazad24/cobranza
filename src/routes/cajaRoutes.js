@@ -6,10 +6,11 @@ const {
   cerrarCaja,
   getResumenCajaAdmin,
   getHistorialCobrador,
-  getMiCajaHoy
+  getMiCajaHoy,
 } = require('../controllers/cajaController');
 
 const { verifyToken } = require('../middlewares/authMiddleware');
+
 
 router.post('/', verifyToken, abrirCaja);
 router.put('/:id/cerrar', verifyToken, cerrarCaja);

@@ -1,12 +1,23 @@
-// routes/clientsRoutes.js
 const express = require('express');
-const router  = express.Router();
-const { verifyToken } = require('../middlewares/authMiddleware');
-const { getClientes, getCobradores, deleteClientes } = require('../controllers/clientController');
+const router = express.Router();
 
-router.get('/',           verifyToken, getClientes);
+const {
+  getClientes,
+  getCobradores,
+  deleteClientes,
+} = require('../controllers/clientController');
+
+const { verifyToken } = require('../middlewares/authMiddleware');
+
+console.log({
+  getClientes: typeof getClientes,
+  getCobradores: typeof getCobradores,
+  deleteClientes: typeof deleteClientes,
+  verifyToken: typeof verifyToken,
+});
+
+router.get('/', verifyToken, getClientes);
 router.get('/cobradores', verifyToken, getCobradores);
-// Agregar esta línea
-router.delete('/', verifyToken, deleteClientes); // DELETE /api/clients  body: { cliente_ids: [...] }
+router.delete('/', verifyToken, deleteClientes);
 
 module.exports = router;

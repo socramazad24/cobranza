@@ -8,14 +8,26 @@ const toDateString = (date) => {
 
 const abrirCaja = async (req, res) => {
   const supabase = getSupabase();
-  const { cobrador_id, base_entregada, fecha } = req.body;
+
+  const rawCobradorId = req.body.cobrador_id ?? req.body.cobradorid;
+  const cobrador_id =
+    !rawCobradorId || rawCobradorId === 'null' || rawCobradorId === 'undefined'
+      ? req.user?.id
+      : rawCobradorId;
+
+  const baseRecibida =
+    req.body.base_entregada ??
+    req.body.baseentregada ??
+    0;
+
+  const { fecha } = req.body;
   const fechaStr = toDateString(fecha);
 
   if (!cobrador_id) {
     return res.status(400).json({ error: 'cobrador_id es requerido' });
   }
 
-  const base = Number(base_entregada);
+  const base = Number(baseRecibida);
   if (Number.isNaN(base) || base < 0) {
     return res.status(400).json({ error: 'base_entregada debe ser un número válido' });
   }
@@ -23,7 +35,7 @@ const abrirCaja = async (req, res) => {
   try {
     const { data: existente, error: findError } = await supabase
       .from('caja_diaria')
-      .select('id, total_cobrado, total_entregado')
+      .select('id, total_cobrado, total_entregado, base_entregada')
       .eq('cobrador_id', cobrador_id)
       .eq('fecha', fechaStr)
       .maybeSingle();
@@ -34,36 +46,46 @@ const abrirCaja = async (req, res) => {
       const totalCobrado = Number(existente.total_cobrado || 0);
       const totalEntregado =
         existente.total_entregado == null ? null : Number(existente.total_entregado);
+
+      const nuevaBase = base;
       const diferencia =
-        totalEntregado == null ? 0 : base + totalCobrado - totalEntregado;
+        totalEntregado == null ? 0 : nuevaBase + totalCobrado - totalEntregado;
 
       const { error: updateError } = await supabase
         .from('caja_diaria')
         .update({
-          base_entregada: base,
+          base_entregada: nuevaBase,
           diferencia,
         })
         .eq('id', existente.id);
 
       if (updateError) throw updateError;
-    } else {
-      const { error: insertError } = await supabase
-        .from('caja_diaria')
-        .insert([
-          {
-            cobrador_id,
-            fecha: fechaStr,
-            base_entregada: base,
-            total_cobrado: 0,
-            total_entregado: 0,
-            diferencia: base,
-          },
-        ]);
 
-      if (insertError) throw insertError;
+      return res.status(200).json({
+        message: 'Caja del día actualizada correctamente',
+        ya_existia: true,
+      });
     }
 
-    return res.status(201).json({ message: 'Caja abierta/actualizada correctamente' });
+    const { error: insertError } = await supabase
+      .from('caja_diaria')
+      .insert([
+        {
+          cobrador_id,
+          fecha: fechaStr,
+          base_entregada: base,
+          total_cobrado: 0,
+          total_entregado: 0,
+          diferencia: base,
+        },
+      ]);
+
+    if (insertError) throw insertError;
+
+    return res.status(201).json({
+      message: 'Caja del día creada correctamente',
+      ya_existia: false,
+    });
   } catch (error) {
     console.error('Error abrirCaja:', error.message);
     return res.status(400).json({ error: error.message });
@@ -151,6 +173,7 @@ const getResumenCajaAdmin = async (req, res) => {
         const cobrado = Number(caja.total_cobrado || 0);
         const entregado =
           caja.total_entregado == null ? null : Number(caja.total_entregado);
+
         const diferencia =
           caja.diferencia == null
             ? base + cobrado - Number(caja.total_entregado || 0)

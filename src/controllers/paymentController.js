@@ -4,7 +4,8 @@ const todayStr = () => new Date().toISOString().split('T')[0];
 
 const registerPayment = async (req, res) => {
   const supabase = getSupabase();
-  const { prestamo_id, monto_pagado } = req.body;
+  const prestamo_id = req.body.prestamo_id || req.body.prestamoid;
+  const monto_pagado = req.body.monto_pagado || req.body.montopagado;
   const cobrador_id = req.user.id;
 
   if (!prestamo_id) {
@@ -31,7 +32,10 @@ const registerPayment = async (req, res) => {
       });
     }
 
-    if (String(prestamo.cobrador_id) !== String(cobrador_id) && req.user.rol !== 'admin') {
+    if (
+      String(prestamo.cobrador_id) !== String(cobrador_id) &&
+      req.user.rol !== 'admin'
+    ) {
       return res.status(403).json({
         error: 'No puedes registrar pagos de un préstamo que no te pertenece',
       });
@@ -87,11 +91,17 @@ const registerPayment = async (req, res) => {
 
     if (cajaExistente) {
       const baseEntregada = Number(cajaExistente.base_entregada || 0);
-      const nuevoTotalCobrado = Number(cajaExistente.total_cobrado || 0) + montoIngresado;
+      const nuevoTotalCobrado =
+        Number(cajaExistente.total_cobrado || 0) + montoIngresado;
       const totalEntregado =
-        cajaExistente.total_entregado == null ? null : Number(cajaExistente.total_entregado);
+        cajaExistente.total_entregado == null
+          ? null
+          : Number(cajaExistente.total_entregado);
+
       const nuevaDiferencia =
-        totalEntregado == null ? 0 : baseEntregada + nuevoTotalCobrado - totalEntregado;
+        totalEntregado == null
+          ? 0
+          : baseEntregada + nuevoTotalCobrado - totalEntregado;
 
       const { error: updateCajaError } = await supabase
         .from('caja_diaria')
@@ -197,11 +207,16 @@ const getActiveLoans = async (req, res) => {
 
 const renewLoan = async (req, res) => {
   const supabase = getSupabase();
-  const { prestamo_id, dias_plazo } = req.body;
+  const prestamo_id = req.body.prestamo_id || req.body.prestamoid;
+  const dias_plazo = req.body.dias_plazo || req.body.diasplazo;
   const cobrador_id = req.user.id;
 
   if (!prestamo_id) {
     return res.status(400).json({ error: 'prestamo_id es requerido' });
+  }
+
+  if (!dias_plazo || Number(dias_plazo) <= 0) {
+    return res.status(400).json({ error: 'dias_plazo debe ser mayor a 0' });
   }
 
   try {
