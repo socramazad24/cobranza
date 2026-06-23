@@ -64,6 +64,7 @@ const abrirCaja = async (req, res) => {
       return res.status(200).json({
         message: 'Caja del día actualizada correctamente',
         ya_existia: true,
+        yaexistia: true,
       });
     }
 
@@ -85,6 +86,7 @@ const abrirCaja = async (req, res) => {
     return res.status(201).json({
       message: 'Caja del día creada correctamente',
       ya_existia: false,
+      yaexistia: false,
     });
   } catch (error) {
     console.error('Error abrirCaja:', error.message);
@@ -95,7 +97,7 @@ const abrirCaja = async (req, res) => {
 const cerrarCaja = async (req, res) => {
   const supabase = getSupabase();
   const { id } = req.params;
-  const { total_entregado } = req.body;
+  const total_entregado = req.body.total_entregado ?? req.body.totalentregado;
 
   const entregado = Number(total_entregado);
   if (Number.isNaN(entregado) || entregado < 0) {
@@ -182,11 +184,16 @@ const getResumenCajaAdmin = async (req, res) => {
         return {
           id: caja.id,
           usuariosid: caja.cobrador_id,
+          cobrador_id: caja.cobrador_id,
           cobradornombre: caja.usuarios?.nombre ?? '',
+          cobrador_nombre: caja.usuarios?.nombre ?? '',
           fecha: caja.fecha,
           baseentregada: base,
+          base_entregada: base,
           totalcobrado: cobrado,
+          total_cobrado: cobrado,
           totalentregado: entregado,
+          total_entregado: entregado,
           diferencia,
           pagosdeldia: (pagos ?? []).map((p) => ({
             id: p.id,
@@ -217,10 +224,15 @@ const getResumenCajaAdmin = async (req, res) => {
       resumen: {
         fecha,
         totalbaseentregada: totalBaseEntregada,
+        total_base_entregada: totalBaseEntregada,
         totalcobrado: totalCobrado,
+        total_cobrado: totalCobrado,
         totalentregado: totalEntregado,
+        total_entregado: totalEntregado,
         saldocaja: saldoCaja,
+        saldo_caja: saldoCaja,
         totalcobradores: cajasConPagos.length,
+        total_cobradores: cajasConPagos.length,
       },
       cajas: cajasConPagos,
     });
@@ -258,11 +270,17 @@ const getHistorialCobrador = async (req, res) => {
     const historial = (data ?? []).map((caja) => ({
       id: caja.id,
       usuariosid: caja.cobrador_id,
+      cobrador_id: caja.cobrador_id,
       cobradornombre: caja.usuarios?.nombre ?? '',
+      cobrador_nombre: caja.usuarios?.nombre ?? '',
       fecha: caja.fecha,
       baseentregada: Number(caja.base_entregada || 0),
+      base_entregada: Number(caja.base_entregada || 0),
       totalcobrado: Number(caja.total_cobrado || 0),
+      total_cobrado: Number(caja.total_cobrado || 0),
       totalentregado:
+        caja.total_entregado == null ? null : Number(caja.total_entregado),
+      total_entregado:
         caja.total_entregado == null ? null : Number(caja.total_entregado),
       diferencia:
         caja.diferencia == null ? null : Number(caja.diferencia),
@@ -311,32 +329,46 @@ const getMiCajaHoy = async (req, res) => {
     if (!caja) {
       return res.json({
         tienecaja: false,
+        tiene_caja: false,
         fecha,
         baseentregada: 0,
+        base_entregada: 0,
         totalcobrado: 0,
+        total_cobrado: 0,
         totalentregado: 0,
+        total_entregado: 0,
         diferencia: 0,
         pagosdeldia: [],
+        pagos_del_dia: [],
       });
     }
 
+    const pagosDelDia = (pagos ?? []).map((p) => ({
+      id: p.id,
+      prestamo_id: p.prestamo_id,
+      monto_pagado: Number(p.monto_pagado || 0),
+      fecha_pago: p.fecha_pago,
+      cobrador_id: p.cobrador_id,
+    }));
+
     return res.json({
       tienecaja: true,
+      tiene_caja: true,
       id: caja.id,
+      cobrador_id: caja.cobrador_id,
       fecha: caja.fecha,
       baseentregada: Number(caja.base_entregada || 0),
+      base_entregada: Number(caja.base_entregada || 0),
       totalcobrado: Number(caja.total_cobrado || 0),
+      total_cobrado: Number(caja.total_cobrado || 0),
       totalentregado:
+        caja.total_entregado == null ? 0 : Number(caja.total_entregado),
+      total_entregado:
         caja.total_entregado == null ? 0 : Number(caja.total_entregado),
       diferencia:
         caja.diferencia == null ? 0 : Number(caja.diferencia),
-      pagosdeldia: (pagos ?? []).map((p) => ({
-        id: p.id,
-        prestamo_id: p.prestamo_id,
-        monto_pagado: Number(p.monto_pagado || 0),
-        fecha_pago: p.fecha_pago,
-        cobrador_id: p.cobrador_id,
-      })),
+      pagosdeldia: pagosDelDia,
+      pagos_del_dia: pagosDelDia,
     });
   } catch (error) {
     console.error('Error getMiCajaHoy:', error.message);

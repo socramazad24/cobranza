@@ -19,7 +19,16 @@ router.get('/:id/resumen', verifyToken, getResumenRuta);
 
 router.post('/', verifyToken, createRuta);
 router.put('/:id', verifyToken, updateRuta);
-router.put('/cobrador/:id', verifyToken, asignarRutas);
+router.put(
+  '/cobrador/:id',
+  verifyToken,
+  (req, res, next) => {
+    req.body.cobrador_id =
+      req.body.cobrador_id || req.body.cobradorid || req.params.id;
+    next();
+  },
+  asignarRutas
+);
 router.delete('/:id', verifyToken, deleteRuta);
 
 module.exports = router;

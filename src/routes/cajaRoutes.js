@@ -11,7 +11,6 @@ const {
 
 const { verifyToken } = require('../middlewares/authMiddleware');
 
-
 router.post('/', verifyToken, abrirCaja);
 router.put('/:id/cerrar', verifyToken, cerrarCaja);
 router.get('/resumen', verifyToken, getResumenCajaAdmin);

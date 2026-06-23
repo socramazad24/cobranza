@@ -47,6 +47,7 @@ const registerPayment = async (req, res) => {
       return res.status(400).json({
         error: `El monto $${montoIngresado.toFixed(0)} supera el saldo pendiente de $${saldoActual.toFixed(0)}`,
         saldopendiente: saldoActual,
+        saldo_pendiente: saldoActual,
       });
     }
 
@@ -133,8 +134,10 @@ const registerPayment = async (req, res) => {
       message: 'Pago registrado',
       pago,
       saldorestante: saldoFinal,
+      saldo_restante: saldoFinal,
       estado: nuevoEstado,
       fecha_pago: pago?.fecha_pago ?? new Date().toISOString(),
+      fechapago: pago?.fecha_pago ?? new Date().toISOString(),
     });
   } catch (error) {
     console.error('Error en pago:', error.message);
@@ -156,7 +159,15 @@ const getPaymentHistory = async (req, res) => {
     return res.status(400).json({ error: error.message });
   }
 
-  return res.json(data);
+  const historial = (data ?? []).map((p) => ({
+    ...p,
+    prestamoid: p.prestamo_id,
+    montopagado: p.monto_pagado,
+    fechapago: p.fecha_pago,
+    cobradorid: p.cobrador_id,
+  }));
+
+  return res.json(historial);
 };
 
 const getActiveLoans = async (req, res) => {
@@ -202,14 +213,46 @@ const getActiveLoans = async (req, res) => {
     return res.status(400).json({ error: error.message });
   }
 
-  return res.json(data);
+  const prestamos = (data ?? []).map((p) => ({
+    ...p,
+
+    montoprestado: p.monto_prestado,
+    montototal: p.monto_total,
+    saldopendiente: p.saldo_pendiente,
+    cuotadiaria: p.cuota_diaria,
+    fechainicio: p.fecha_inicio,
+    fechafin: p.fecha_fin,
+    cobradorid: p.cobrador_id,
+
+    usuarios: p.usuarios
+      ? {
+          ...p.usuarios,
+          cobradornombre: p.usuarios.nombre,
+        }
+      : null,
+
+    clientes: p.clientes
+      ? {
+          ...p.clientes,
+          clientenombre: p.clientes.nombre,
+          clientetelefono: p.clientes.telefono,
+          rutas: p.clientes.rutas
+            ? {
+                ...p.clientes.rutas,
+                rutanombre: p.clientes.rutas.nombre,
+              }
+            : null,
+        }
+      : null,
+  }));
+
+  return res.json(prestamos);
 };
 
 const renewLoan = async (req, res) => {
   const supabase = getSupabase();
   const prestamo_id = req.body.prestamo_id || req.body.prestamoid;
   const dias_plazo = req.body.dias_plazo || req.body.diasplazo;
-  const cobrador_id = req.user.id;
 
   if (!prestamo_id) {
     return res.status(400).json({ error: 'prestamo_id es requerido' });
@@ -222,7 +265,7 @@ const renewLoan = async (req, res) => {
   try {
     const { data: prestamo, error: fetchError } = await supabase
       .from('prestamos')
-      .select('id, saldo_pendiente, clientes(id)')
+      .select('id, saldo_pendiente, cobrador_id, clientes(id)')
       .eq('id', prestamo_id)
       .single();
 
@@ -243,12 +286,12 @@ const renewLoan = async (req, res) => {
     const fechaFin = new Date();
     fechaFin.setDate(fechaInicio.getDate() + Number(dias_plazo));
 
-    const { error: newLoanError } = await supabase
+    const { data: nuevoPrestamo, error: newLoanError } = await supabase
       .from('prestamos')
       .insert([
         {
           cliente_id: prestamo.clientes.id,
-          cobrador_id,
+          cobrador_id: prestamo.cobrador_id,
           monto_prestado: nuevoMonto,
           monto_total: nuevoTotal,
           saldo_pendiente: nuevoTotal,
@@ -257,12 +300,16 @@ const renewLoan = async (req, res) => {
           fecha_fin: fechaFin.toISOString(),
           estado: 'activo',
         },
-      ]);
+      ])
+      .select('*')
+      .single();
 
     if (newLoanError) throw newLoanError;
 
     return res.status(201).json({
       message: 'Préstamo renovado exitosamente',
+      prestamo: nuevoPrestamo,
+      prestamoid: nuevoPrestamo.id,
     });
   } catch (error) {
     console.error('Error al renovar:', error.message);
