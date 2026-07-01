@@ -267,4 +267,82 @@ const getClavos = async (req, res) => {
   }
 };
 
-module.exports = { createLoan, updateLoan, getClavos, importarPrestamos };
+const getLoansByCobrador = async (req, res) => {
+  const supabase = getSupabase();
+  const cobradorId = req.params.cobradorId;
+
+  try {
+    if (req.user?.rol !== "admin") {
+      return res.status(403).json({ error: "Solo el administrador puede ver esta información" });
+    }
+
+    const { data, error } = await supabase
+      .from("prestamos")
+      .select(`
+        id,
+        cliente_id,
+        cobrador_id,
+        monto_prestado,
+        monto_total,
+        saldo_pendiente,
+        cuota_diaria,
+        fecha_inicio,
+        fecha_fin,
+        estado,
+        created_at,
+        clientes (
+          id,
+          nombre,
+          telefono,
+          direccion,
+          ruta_id,
+          rutas (
+            id,
+            nombre
+          )
+        ),
+        usuarios!prestamos_cobrador_id_fkey (
+          id,
+          nombre
+        )
+      `)
+      .eq("cobrador_id", cobradorId)
+      .in("estado", ["activo", "mora", "pagado", "renovado"])
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    const prestamos = (data ?? []).map((p) => ({
+      id: p.id,
+      cliente_id: p.cliente_id,
+      cliente_nombre: p.clientes?.nombre ?? "Sin cliente",
+      cliente_telefono: p.clientes?.telefono ?? "",
+      cliente_direccion: p.clientes?.direccion ?? "",
+      ruta_id: p.clientes?.rutas?.id ?? null,
+      ruta_nombre: p.clientes?.rutas?.nombre ?? "Sin ruta",
+      cobrador_id: p.cobrador_id,
+      cobrador_nombre: p.usuarios?.nombre ?? "Sin cobrador",
+      monto_prestado: Number(p.monto_prestado || 0),
+      monto_total: Number(p.monto_total || 0),
+      saldo_pendiente: Number(p.saldo_pendiente || 0),
+      cuota_diaria: Number(p.cuota_diaria || 0),
+      fecha_inicio: p.fecha_inicio,
+      fecha_fin: p.fecha_fin,
+      estado: p.estado,
+      created_at: p.created_at,
+    }));
+
+    return res.json(prestamos);
+  } catch (error) {
+    console.error("Error getLoansByCobrador:", error.message);
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+module.exports = {
+  createLoan,
+  updateLoan,
+  getClavos,
+  importarPrestamos,
+  getLoansByCobrador,
+};

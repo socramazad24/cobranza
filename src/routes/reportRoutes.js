@@ -1,10 +1,14 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const { getResumen, getResumenCobrador, getResumenGastos } = require('../controllers/reportController');
-const { verifyToken } = require('../middlewares/authMiddleware');
+const { verifyToken } = require("../middlewares/authMiddleware");
+const {
+  getResumen,
+  getResumenCobrador,
+  getResumenGastos,
+} = require("../controllers/reportController");
 
-router.get('/resumen',           verifyToken, getResumen);
-router.get('/resumen-cobrador',  verifyToken, getResumenCobrador);
-router.get('/gastos-resumen',    verifyToken, getResumenGastos);
+router.get("/resumen", verifyToken, getResumen);
+router.get("/resumen-cobrador", verifyToken, getResumenCobrador);
+router.get("/resumen-gastos", verifyToken, getResumenGastos);
 
 module.exports = router;
