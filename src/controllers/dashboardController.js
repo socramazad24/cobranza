@@ -500,4 +500,132 @@ const getDashboardCobrador = async (req, res) => {
   }
 };
 
-module.exports = { getDashboardAdmin, getDashboardCobrador };
+// src/controllers/dashboardController.js
+// (AGREGA estas líneas al final del archivo, ANTES del module.exports)
+
+/**
+ * Obtiene la(s) cuota(s) que el cobrador debe cobrar HOY
+ * Devuelve un resumen de qué préstamos tienen pagos programados para hoy
+ */
+const getCuotasDelDia = async (req, res) => {
+  const supabase = getSupabase();
+  const userId = req.user.id;
+  const fecha = toDateOnly(req.query.fecha);
+
+  try {
+    // 1. Buscar pagos programados para hoy de préstamos activos del cobrador
+    const { data: pagosProgramados, error: ppError } = await supabase
+      .from('pagos_programados')
+      .select(`
+        id, prestamo_id, numero_pago, fecha_programada, monto_esperado, pagado,
+        prestamos!inner (
+          id, estado, monto_total, saldo_pendiente, fecha_fin,
+          clientes ( id, nombre, telefono, ruta_id, rutas(nombre) )
+        )
+      `)
+      .eq('prestamos.cobrador_id', userId)
+      .eq('fecha_programada', fecha)
+      .eq('pagado', false)
+      .in('prestamos.estado', ['activo', 'mora'])
+      .order('numero_pago');
+
+    if (ppError) {
+      console.log('Tabla pagos_programados no existe, calculando en vivo...');
+    }
+
+    let cuotas = [];
+
+    if (pagosProgramados && pagosProgramados.length > 0) {
+      // Usar la tabla de pagos programados
+      cuotas = pagosProgramados.map((pp) => ({
+        pago_programado_id: pp.id,
+        prestamo_id: pp.prestamo_id,
+        numero_pago: pp.numero_pago,
+        fecha_programada: pp.fecha_programada,
+        monto_esperado: Number(pp.monto_esperado) || 0,
+        cliente_nombre: pp.prestamos?.clientes?.nombre ?? 'Sin nombre',
+        cliente_telefono: pp.prestamos?.clientes?.telefono ?? '',
+        ruta_nombre: pp.prestamos?.clientes?.rutas?.nombre ?? '',
+        estado_prestamo: pp.prestamos?.estado ?? 'activo',
+        saldo_pendiente: Number(pp.prestamos?.saldo_pendiente) || 0,
+      }));
+    } else {
+      // Calcular en vivo basándose en frecuencia
+      const { data: prestamos, error: pError } = await supabase
+        .from('prestamos')
+        .select(`
+          id, estado, monto_total, saldo_pendiente, cuota_diaria,
+          fecha_inicio, fecha_fin, frecuencia, total_pagos_programados, pagos_realizados,
+          clientes ( id, nombre, telefono, ruta_id, rutas(nombre) )
+        `)
+        .eq('cobrador_id', userId)
+        .in('estado', ['activo', 'mora']);
+
+      if (pError) throw pError;
+
+      const { calcularCuota, generarFechasPago, getInfoFrecuencia } = require('../utils/frecuenciaHelper');
+      const targetDate = new Date(fecha + 'T00:00:00');
+
+      for (const p of prestamos ?? []) {
+        const cfg = getInfoFrecuencia(p.frecuencia || 'diario');
+        const numPagos = p.total_pagos_programados || cfg.pagosPorPlazo(
+          Math.ceil((new Date(p.fecha_fin) - new Date(p.fecha_inicio)) / (1000 * 60 * 60 * 24))
+        );
+        const fechas = generarFechasPago(new Date(p.fecha_inicio), p.frecuencia || 'diario', numPagos);
+
+        // Buscar si la fecha de hoy está en las fechas de pago
+        const idxHoy = fechas.findIndex(f =>
+          f.toISOString().split('T')[0] === fecha
+        );
+
+        if (idxHoy >= 0) {
+          const numeroPago = idxHoy + 1;
+          // Verificar si este pago ya fue hecho (chequear en tabla pagos)
+          const { data: pagosHechos, error: phError } = await supabase
+            .from('pagos')
+            .select('id')
+            .eq('prestamo_id', p.id)
+            .gte('fecha_pago', `${fecha}T00:00:00`)
+            .lte('fecha_pago', `${fecha}T23:59:59`);
+
+          if (phError) throw phError;
+
+          // Solo agregar si no se ha pagado hoy
+          if (!pagosHechos || pagosHechos.length === 0) {
+            cuotas.push({
+              prestamo_id: p.id,
+              numero_pago: numeroPago,
+              fecha_programada: fecha,
+              monto_esperado: p.cuota_diaria,
+              cliente_nombre: p.clientes?.nombre ?? 'Sin nombre',
+              cliente_telefono: p.clientes?.telefono ?? '',
+              ruta_nombre: p.clientes?.rutas?.nombre ?? '',
+              estado_prestamo: p.estado,
+              saldo_pendiente: Number(p.saldo_pendiente) || 0,
+            });
+          }
+        }
+      }
+    }
+
+    const totalCuotas = cuotas.length;
+    const totalEsperado = cuotas.reduce((s, c) => s + c.monto_esperado, 0);
+    const totalPagadoHoy = 0; // Se calcula en el cliente
+
+    return res.json({
+      fecha,
+      resumen: {
+        total_cuotas_pendientes: totalCuotas,
+        total_esperado: totalEsperado,
+        total_pagado_hoy: totalPagadoHoy,
+      },
+      cuotas,
+    });
+  } catch (error) {
+    console.error('Error getCuotasDelDia:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+// Reemplaza el module.exports al final:
+module.exports = { getDashboardAdmin, getDashboardCobrador, getCuotasDelDia };

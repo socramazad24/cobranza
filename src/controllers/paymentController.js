@@ -1,3 +1,4 @@
+// src/controllers/paymentController.js
 const getSupabase = require('../config/supabaseClient');
 
 const registerPayment = async (req, res) => {
@@ -33,6 +34,7 @@ const registerPayment = async (req, res) => {
         saldo_pendiente: saldoActual,
       });
 
+    // 1. Registrar el pago
     const { data: pago, error: pagoError } = await supabase
       .from('pagos')
       .insert({ prestamo_id: prestamoid, cobrador_id: cobradorid, monto_pagado: montoIngresado })
@@ -41,6 +43,7 @@ const registerPayment = async (req, res) => {
 
     if (pagoError) throw pagoError;
 
+    // 2. Actualizar saldo del préstamo
     const nuevoSaldo = saldoActual - montoIngresado;
     const saldoFinal = nuevoSaldo < 0 ? 0 : nuevoSaldo;
     const nuevoEstado = saldoFinal === 0 ? 'pagado' : 'activo';
@@ -52,7 +55,7 @@ const registerPayment = async (req, res) => {
 
     if (updatePrestamoError) throw updatePrestamoError;
 
-    // ── Actualizar caja_diaria ───────────────────────────────────────────────
+    // 3. 🆕 AUTO-CREAR o ACTUALIZAR caja del día
     const fecha = new Date().toISOString().split('T')[0];
 
     const { data: cajaExistente, error: cajaError } = await supabase
@@ -64,31 +67,59 @@ const registerPayment = async (req, res) => {
 
     if (cajaError) throw cajaError;
 
-    if (cajaExistente) {
+    let cajaResult;
+    let cajaAccion = 'actualizada';
+
+    if (!cajaExistente) {
+      // 🆕 CREAR caja automáticamente con el primer pago del día
+      // base = 0, total_cobrado = montoIngresado, total_entregado = 0, diferencia = montoIngresado
+      const { data: nuevaCaja, error: insertCajaError } = await supabase
+        .from('caja_diaria')
+        .insert({
+          cobrador_id: cobradorid,
+          fecha,
+          base_entregada: 0,
+          total_cobrado: montoIngresado,
+          total_entregado: 0,  // 🔑 ABIERTA (NO cerrada)
+          diferencia: montoIngresado,  // pendiente = cobrado - entregado
+        })
+        .select()
+        .single();
+
+      if (insertCajaError) throw insertCajaError;
+      cajaResult = nuevaCaja;
+      cajaAccion = 'creada';
+    } else {
+      // Actualizar caja existente
       const baseEntregada = Number(cajaExistente.base_entregada) || 0;
       const nuevoTotalCobrado = (Number(cajaExistente.total_cobrado) || 0) + montoIngresado;
-      const totalEntregado =
-        cajaExistente.total_entregado === null ? null : Number(cajaExistente.total_entregado);
-      // Si la caja ya está cerrada, diferencia se actualiza (pendiente extra)
-      const nuevaDiferencia =
-        totalEntregado === null ? 0 : baseEntregada + nuevoTotalCobrado - totalEntregado;
+      const totalEntregado = cajaExistente.total_entregado === null
+        ? null
+        : Number(cajaExistente.total_entregado);
 
-      const { error: updateCajaError } = await supabase
+      // Si la caja ya estaba cerrada, la REABRIMOS automáticamente
+      // porque hay nuevo cobro
+      const cajaCerrada = totalEntregado !== null;
+      const nuevoTotalEntregado = cajaCerrada ? 0 : totalEntregado;
+      const nuevaDiferencia = cajaCerrada
+        ? baseEntregada + nuevoTotalCobrado  // Reabierta, todo está pendiente
+        : baseEntregada + nuevoTotalCobrado - (totalEntregado || 0);
+
+      const { data: cajaActualizada, error: updateCajaError } = await supabase
         .from('caja_diaria')
-        .update({ total_cobrado: nuevoTotalCobrado, diferencia: nuevaDiferencia })
-        .eq('id', cajaExistente.id);
+        .update({
+          total_cobrado: nuevoTotalCobrado,
+          total_entregado: nuevoTotalEntregado,  // null si se reabre
+          diferencia: nuevaDiferencia,
+          cerrado_por: cajaCerrada ? null : cajaExistente.cerrado_por,  // Limpiar si se reabre
+        })
+        .eq('id', cajaExistente.id)
+        .select()
+        .single();
 
       if (updateCajaError) throw updateCajaError;
-    } else {
-      const { error: insertCajaError } = await supabase.from('caja_diaria').insert({
-        cobrador_id: cobradorid,
-        fecha,
-        base_entregada: 0,
-        total_cobrado: montoIngresado,
-        total_entregado: 0,
-        diferencia: montoIngresado,
-      });
-      if (insertCajaError) throw insertCajaError;
+      cajaResult = cajaActualizada;
+      cajaAccion = cajaCerrada ? 'reabierta_y_actualizada' : 'actualizada';
     }
 
     return res.status(201).json({
@@ -97,6 +128,13 @@ const registerPayment = async (req, res) => {
       saldorestante: saldoFinal,
       estado: nuevoEstado,
       fechapago: pago?.fecha_pago ?? new Date().toISOString(),
+      caja: {
+        accion: cajaAccion,
+        id: cajaResult.id,
+        total_cobrado: Number(cajaResult.total_cobrado) || 0,
+        total_entregado: cajaResult.total_entregado === null ? null : Number(cajaResult.total_entregado),
+        diferencia: Number(cajaResult.diferencia) || 0,
+      },
     });
   } catch (error) {
     console.error('Error en pago:', error.message);
@@ -217,4 +255,69 @@ const renewLoan = async (req, res) => {
   }
 };
 
-module.exports = { registerPayment, getPaymentHistory, getActiveLoans, renewLoan };
+// 🆕 Obtiene los pagos que ya se hicieron HOY a un préstamo específico
+const getPagosDelDia = async (req, res) => {
+  const supabase = getSupabase();
+  const prestamoid = req.params.prestamoid;
+  const cobradorid = req.user.id;
+
+  if (!prestamoid) {
+    return res.status(400).json({ error: 'prestamoid es requerido' });
+  }
+
+  const hoy = new Date();
+  const inicioHoy = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate(), 0, 0, 0);
+  const finHoy = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate(), 23, 59, 59);
+
+  try {
+    const { data, error } = await supabase
+      .from('pagos')
+      .select('id, monto_pagado, fecha_pago, cobrador_id')
+      .eq('prestamo_id', prestamoid)
+      .gte('fecha_pago', inicioHoy.toISOString())
+      .lte('fecha_pago', finHoy.toISOString())
+      .order('fecha_pago', { ascending: false });
+
+    if (error) throw error;
+
+    console.log('📅 Pagos de hoy para préstamo', prestamoid, ':', data);
+
+    const pagosCobrador = (data ?? []).filter(p =>
+      String(p.cobrador_id) === String(cobradorid) || req.user.rol === 'admin'
+    );
+
+    const totalCobradoHoy = pagosCobrador.reduce(
+      (sum, p) => sum + Number(p.monto_pagado || 0), 0
+    );
+
+    console.log('💰 Total cobrado hoy:', totalCobradoHoy, 'tipo:', typeof totalCobradoHoy);
+
+    const response = {
+      prestamo_id: prestamoid,
+      fecha: hoy.toISOString().split('T')[0],
+      total_cobrado_hoy: totalCobradoHoy,
+      cantidad_pagos: pagosCobrador.length,
+      pagos: pagosCobrador.map(p => ({
+        id: p.id,
+        monto: Number(p.monto_pagado) || 0,
+        fecha: p.fecha_pago,
+      })),
+    };
+
+    console.log('📤 Enviando:', response);
+    return res.json(response);
+  } catch (error) {
+    console.error('Error getPagosDelDia:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+
+// En el module.exports al final del archivo, agrega:
+module.exports = {
+  registerPayment,
+  getPaymentHistory,
+  getActiveLoans,
+  renewLoan,
+  getPagosDelDia,  // 🆕
+};
