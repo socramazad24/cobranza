@@ -1,4 +1,6 @@
+// src/controllers/loanController.js
 const getSupabase = require('../config/supabaseClient');
+const { calcularCuota, generarFechasPago, getInfoFrecuencia } = require('../utils/frecuenciaHelper');
 
 const createLoan = async (req, res) => {
   const supabase = getSupabase();
@@ -6,12 +8,18 @@ const createLoan = async (req, res) => {
     clientenombre, clientetelefono, clientedireccion,
     montoprestado, montototal, diasplazo,
     cobradorid, rutaid, rutanombre,
+    frecuencia = 'diario',
   } = req.body;
 
   const responsableid = req.user.rol === 'admin' ? cobradorid : req.user.id;
   const montoPrestado = Number(montoprestado);
   const montoTotalManual = (montototal === null || montototal === undefined) ? null : Number(montototal);
   const diasPlazo = Number(diasplazo);
+
+  // Validar frecuencia
+  if (!['diario', 'semanal', 'quincenal', 'mensual'].includes(frecuencia)) {
+    return res.status(400).json({ error: 'frecuencia debe ser: diario, semanal, quincenal o mensual' });
+  }
 
   // Trim correcto para nombres con letras latinas y tildes
   const nombreTrimmed = (clientenombre ?? '').replace(/\s+/g, ' ').trim();
@@ -24,8 +32,8 @@ const createLoan = async (req, res) => {
   if (isNaN(montoPrestado) || montoPrestado <= 0)
     return res.status(400).json({ error: 'montoprestado inválido' });
 
-  if (isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 60)
-    return res.status(400).json({ error: 'El plazo debe ser entre 7 y 60 días' });
+  if (isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 365)
+    return res.status(400).json({ error: 'El plazo debe ser entre 7 y 365 días' });
 
   if (montoTotalManual !== null && (isNaN(montoTotalManual) || montoTotalManual <= montoPrestado))
     return res.status(400).json({ error: 'montototal debe ser mayor que montoprestado' });
@@ -47,13 +55,14 @@ const createLoan = async (req, res) => {
     }
 
     if (rutaIdFinal) {
-      await supabase.from('cobrador_rutas').insert({
+      // upsert silencioso (ignora duplicados)
+      await supabase.from('cobrador_rutas').upsert({
         cobrador_id: responsableid,
         ruta_id: rutaIdFinal,
-      });
-      // ignoramos error de duplicado por unique constraint
+      }, { onConflict: 'cobrador_id,ruta_id', ignoreDuplicates: true });
     }
 
+    // 1️⃣ Crear cliente
     const { data: clienteData, error: clienteError } = await supabase
       .from('clientes')
       .insert({
@@ -68,12 +77,19 @@ const createLoan = async (req, res) => {
 
     if (clienteError) throw clienteError;
 
+    // 2️⃣ Calcular según frecuencia
     const montoTotalFinal = montoTotalManual !== null ? montoTotalManual : montoPrestado * 1.2;
-    const cuotaDiaria = montoTotalFinal / diasPlazo;
+    const cuotaPorPeriodo = calcularCuota(montoTotalFinal, diasPlazo, frecuencia);
     const fechaInicio = new Date();
     const fechaFin = new Date();
     fechaFin.setDate(fechaInicio.getDate() + diasPlazo);
 
+    // 3️⃣ Generar calendario de pagos
+    const cfg = getInfoFrecuencia(frecuencia);
+    const numPagos = cfg.pagosPorPlazo(diasPlazo);
+    const fechasPago = generarFechasPago(fechaInicio, frecuencia, diasPlazo);
+
+    // 4️⃣ Crear préstamo con frecuencia
     const { data: prestamoData, error: prestamoError } = await supabase
       .from('prestamos')
       .insert({
@@ -82,20 +98,46 @@ const createLoan = async (req, res) => {
         monto_prestado: montoPrestado,
         monto_total: montoTotalFinal,
         saldo_pendiente: montoTotalFinal,
-        cuota_diaria: cuotaDiaria,
+        cuota_diaria: cuotaPorPeriodo,
         fecha_inicio: fechaInicio.toISOString(),
         fecha_fin: fechaFin.toISOString(),
         estado: 'activo',
+        frecuencia: frecuencia,
+        total_pagos_programados: numPagos,
+        pagos_realizados: 0,
       })
       .select()
       .single();
 
     if (prestamoError) throw prestamoError;
 
+    // 5️⃣ Generar tabla de pagos programados
+    const pagosProgramados = fechasPago.map((fecha, idx) => ({
+      prestamo_id: prestamoData.id,
+      numero_pago: idx + 1,
+      fecha_programada: fecha.toISOString().split('T')[0],
+      monto_esperado: cuotaPorPeriodo,
+      pagado: false,
+    }));
+
+    // Intentar insertar (si la tabla existe)
+    try {
+      await supabase.from('pagos_programados').insert(pagosProgramados);
+    } catch (_) {
+      console.log('Tabla pagos_programados no existe, omitiendo');
+    }
+
     return res.status(201).json({
       message: 'Préstamo creado exitosamente',
       cliente: clienteData,
       prestamo: prestamoData,
+      frecuencia: {
+        tipo: frecuencia,
+        label: cfg.label,
+        cuota_por_periodo: cuotaPorPeriodo,
+        total_pagos: numPagos,
+        fechas_pago: fechasPago.map(f => f.toISOString().split('T')[0]),
+      },
     });
   } catch (error) {
     console.error('Error createLoan:', error.message);
@@ -125,12 +167,17 @@ const importarPrestamos = async (req, res) => {
       const montoTotalRaw = p.monto_total ?? p.montototal;
       const montoTotalFinal = !montoTotalRaw ? montoPrestado * 1.2 : Number(montoTotalRaw);
       const diasPlazo = Number(p.dias_plazo ?? p.diasplazo ?? 30);
+      const frecuencia = p.frecuencia ?? 'diario';
       const nombreTrimmed = String(p.clientenombre ?? '').replace(/\s+/g, ' ').trim();
+
+      if (!['diario', 'semanal', 'quincenal', 'mensual'].includes(frecuencia)) {
+        throw new Error(`frecuencia inválida: ${frecuencia}`);
+      }
 
       if (!nombreTrimmed || nombreTrimmed.length < 3) throw new Error('clientenombre inválido');
       if (isNaN(montoPrestado) || montoPrestado <= 0) throw new Error('montoprestado inválido');
-      if (isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 60)
-        throw new Error('diasplazo debe ser entre 7 y 60');
+      if (isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 365)
+        throw new Error('diasplazo debe ser entre 7 y 365');
 
       let rutaIdFinal = p.ruta_id ?? p.rutaid ?? null;
       const nombreRuta = p.ruta_nombre ?? p.rutanombre;
@@ -148,10 +195,10 @@ const importarPrestamos = async (req, res) => {
       }
 
       if (rutaIdFinal && responsableid) {
-        await supabase.from('cobrador_rutas').insert({
+        await supabase.from('cobrador_rutas').upsert({
           cobrador_id: responsableid,
           ruta_id: rutaIdFinal,
-        });
+        }, { onConflict: 'cobrador_id,ruta_id', ignoreDuplicates: true });
       }
 
       const { data: clienteData, error: clienteError } = await supabase
@@ -167,10 +214,14 @@ const importarPrestamos = async (req, res) => {
 
       if (clienteError) throw clienteError;
 
-      const cuotaDiaria = montoTotalFinal / diasPlazo;
+      // Calcular con frecuencia
+      const cuotaPorPeriodo = calcularCuota(montoTotalFinal, diasPlazo, frecuencia);
+      const cfg = getInfoFrecuencia(frecuencia);
+      const numPagos = cfg.pagosPorPlazo(diasPlazo);
       const fechaInicio = new Date();
       const fechaFin = new Date();
       fechaFin.setDate(fechaInicio.getDate() + diasPlazo);
+      const fechasPago = generarFechasPago(fechaInicio, frecuencia, diasPlazo);
 
       const { error: prestamoError } = await supabase.from('prestamos').insert({
         cliente_id: clienteData.id,
@@ -178,10 +229,13 @@ const importarPrestamos = async (req, res) => {
         monto_prestado: montoPrestado,
         monto_total: montoTotalFinal,
         saldo_pendiente: montoTotalFinal,
-        cuota_diaria: cuotaDiaria,
+        cuota_diaria: cuotaPorPeriodo,
         fecha_inicio: fechaInicio.toISOString(),
         fecha_fin: fechaFin.toISOString(),
         estado: 'activo',
+        frecuencia: frecuencia,
+        total_pagos_programados: numPagos,
+        pagos_realizados: 0,
       });
 
       if (prestamoError) throw prestamoError;
@@ -218,14 +272,18 @@ const updateLoan = async (req, res) => {
   try {
     const montoTotal = montoPrestado * 1.2;
     const { data: prestamoActual, error: fetchError } = await supabase
-      .from('prestamos').select('id, fecha_inicio').eq('id', id).single();
+      .from('prestamos').select('id, fecha_inicio, frecuencia, dias_plazo, total_pagos_programados').eq('id', id).single();
     if (fetchError) throw fetchError;
+
+    const frecuencia = prestamoActual.frecuencia || 'diario';
+    const cfg = getInfoFrecuencia(frecuencia);
 
     const diffMs =
       new Date(fechafin).setHours(0, 0, 0, 0) -
       new Date(prestamoActual.fecha_inicio).setHours(0, 0, 0, 0);
-    const diasPlazo = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
-    const cuotaDiaria = montoTotal / diasPlazo;
+    const diasPlazo = Math.max(cfg.diasPorPeriodo, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+    const cuotaDiaria = calcularCuota(montoTotal, diasPlazo, frecuencia);
+    const numPagos = cfg.pagosPorPlazo(diasPlazo);
     const nuevoEstado = saldoPendiente === 0 ? 'pagado' : 'activo';
 
     const { error: updateError } = await supabase
@@ -237,6 +295,7 @@ const updateLoan = async (req, res) => {
         cuota_diaria: cuotaDiaria,
         fecha_fin: fechafin,
         estado: nuevoEstado,
+        total_pagos_programados: numPagos,
       })
       .eq('id', id);
 
@@ -289,6 +348,9 @@ const getLoansByCobrador = async (req, res) => {
         fecha_inicio,
         fecha_fin,
         estado,
+        frecuencia,
+        total_pagos_programados,
+        pagos_realizados,
         created_at,
         clientes (
           id,
@@ -329,6 +391,9 @@ const getLoansByCobrador = async (req, res) => {
       fecha_inicio: p.fecha_inicio,
       fecha_fin: p.fecha_fin,
       estado: p.estado,
+      frecuencia: p.frecuencia || 'diario',
+      total_pagos_programados: p.total_pagos_programados || 0,
+      pagos_realizados: p.pagos_realizados || 0,
       created_at: p.created_at,
     }));
 
@@ -339,10 +404,67 @@ const getLoansByCobrador = async (req, res) => {
   }
 };
 
+const getCalendarioPagos = async (req, res) => {
+  const supabase = getSupabase();
+  const prestamoid = req.params.id;
+
+  try {
+    const { data: prestamo, error: prestamoError } = await supabase
+      .from('prestamos')
+      .select('frecuencia, cuota_diaria, total_pagos_programados, fecha_inicio, fecha_fin, monto_total, pagos_realizados, dias_plazo')
+      .eq('id', prestamoid)
+      .single();
+
+    if (prestamoError) throw prestamoError;
+
+    // Intentar leer pagos programados
+    let pagosProgramados = [];
+    try {
+      const { data } = await supabase
+        .from('pagos_programados')
+        .select('*')
+        .eq('prestamo_id', prestamoid)
+        .order('numero_pago');
+      pagosProgramados = data ?? [];
+    } catch (_) {
+      // generar en vivo si la tabla no existe
+      const cfg = getInfoFrecuencia(prestamo.frecuencia || 'diario');
+      const totalPagos = prestamo.total_pagos_programados || cfg.pagosPorPlazo(
+        Math.ceil((new Date(prestamo.fecha_fin) - new Date(prestamo.fecha_inicio)) / (1000 * 60 * 60 * 24))
+      );
+      const fechas = generarFechasPago(
+        new Date(prestamo.fecha_inicio),
+        prestamo.frecuencia || 'diario',
+        totalPagos
+      );
+      pagosProgramados = fechas.map((f, idx) => ({
+        numero_pago: idx + 1,
+        fecha_programada: f.toISOString().split('T')[0],
+        monto_esperado: prestamo.cuota_diaria,
+      }));
+    }
+
+    return res.json({
+      prestamo: {
+        id: prestamoid,
+        frecuencia: prestamo.frecuencia || 'diario',
+        cuota_por_periodo: prestamo.cuota_diaria,
+        total_pagos: prestamo.total_pagos_programados,
+        pagos_realizados: prestamo.pagos_realizados || 0,
+        monto_total: prestamo.monto_total,
+      },
+      pagos_programados: pagosProgramados,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+};
+
 module.exports = {
   createLoan,
   updateLoan,
   getClavos,
   importarPrestamos,
   getLoansByCobrador,
+  getCalendarioPagos,
 };
