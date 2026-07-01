@@ -32,6 +32,8 @@ app.use('/api/rutas', rutaRoutes);
 app.use('/api/observaciones', observacionRoutes);
 app.use('/api/clients', require('./src/routes/clientsRoutes'));
 app.use('/api/caja', cajaRoutes);
+app.use('/api/dashboard', require('./src/routes/dashboardRoutes'));
+
 
 
 const PORT = process.env.PORT || 3000;
