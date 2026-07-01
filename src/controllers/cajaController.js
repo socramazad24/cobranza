@@ -6,21 +6,19 @@ const toDateString = (date) => {
   return new Date(date).toISOString().split('T')[0];
 };
 
-// ─── ABRIR / EDITAR BASE ─────────────────────────────────────────────────────
 const abrirCaja = async (req, res) => {
   const supabase = getSupabase();
   const rawCobradorId = req.body.cobrador_id ?? req.body.cobradorid;
-  const cobradorid =
-    !rawCobradorId || rawCobradorId === null || rawCobradorId === 'undefined'
-      ? req.user?.id
-      : rawCobradorId;
+  const cobradorid = (!rawCobradorId || rawCobradorId === null || rawCobradorId === undefined)
+    ? req.user?.id
+    : rawCobradorId;
   const baseRecibida = req.body.base_entregada ?? req.body.baseentregada ?? 0;
-  const fecha = req.body.fecha;
-  const fechaStr = toDateString(fecha);
+  const fechaStr = toDateString(req.body.fecha);
 
   if (!cobradorid) return res.status(400).json({ error: 'cobrador_id es requerido' });
+
   const base = Number(baseRecibida);
-  if (Number.isNaN(base) || base < 0)
+  if (isNaN(base) || base < 0)
     return res.status(400).json({ error: 'base_entregada debe ser un número válido' });
 
   try {
@@ -35,19 +33,20 @@ const abrirCaja = async (req, res) => {
 
     if (existente) {
       const totalCobrado = Number(existente.total_cobrado) || 0;
-      const totalEntregado =
-        existente.total_entregado === null ? null : Number(existente.total_entregado);
-      const nuevaBase = base;
-      const diferencia =
-        totalEntregado === null ? 0 : nuevaBase + totalCobrado - totalEntregado;
+      const totalEntregado = existente.total_entregado === null
+        ? null
+        : Number(existente.total_entregado);
+      const diferencia = totalEntregado === null
+        ? 0
+        : (base + totalCobrado - totalEntregado);
 
       const { error: updateError } = await supabase
         .from('caja_diaria')
-        .update({ base_entregada: nuevaBase, diferencia })
+        .update({ base_entregada: base, diferencia })
         .eq('id', existente.id);
 
       if (updateError) throw updateError;
-      return res.status(200).json({ message: 'Caja del día actualizada correctamente', yaexistia: true });
+      return res.status(200).json({ message: 'Caja actualizada correctamente', yaexistia: true });
     }
 
     const { error: insertError } = await supabase.from('caja_diaria').insert({
@@ -67,13 +66,13 @@ const abrirCaja = async (req, res) => {
   }
 };
 
-// ─── CERRAR CAJA ─────────────────────────────────────────────────────────────
 const cerrarCaja = async (req, res) => {
   const supabase = getSupabase();
   const { id } = req.params;
   const totalentregado = req.body.total_entregado ?? req.body.totalentregado;
   const entregado = Number(totalentregado);
-  if (Number.isNaN(entregado) || entregado < 0)
+
+  if (isNaN(entregado) || entregado < 0)
     return res.status(400).json({ error: 'total_entregado debe ser un número válido' });
 
   try {
@@ -86,7 +85,9 @@ const cerrarCaja = async (req, res) => {
     if (cajaError) throw cajaError;
 
     const diferencia =
-      Number(caja.total_cobrado || 0) + Number(caja.base_entregada || 0) - entregado;
+      (Number(caja.total_cobrado) || 0) +
+      (Number(caja.base_entregada) || 0) -
+      entregado;
 
     const { error: updateError } = await supabase
       .from('caja_diaria')
@@ -105,7 +106,6 @@ const cerrarCaja = async (req, res) => {
   }
 };
 
-// ─── REABRIR CAJA (solo admin) ────────────────────────────────────────────────
 const reabrirCaja = async (req, res) => {
   const supabase = getSupabase();
   const { id } = req.params;
@@ -127,7 +127,7 @@ const reabrirCaja = async (req, res) => {
   }
 };
 
-// ─── EDITAR MONTO RECIBIDO sin historial (admin o cajero) ────────────────────
+// SOLO edita total_entregado — sin recalcular diferencia, sin dejar pendiente
 const editarMontoRecibido = async (req, res) => {
   const supabase = getSupabase();
   const { id } = req.params;
@@ -137,24 +137,15 @@ const editarMontoRecibido = async (req, res) => {
 
   const totalentregado = req.body.total_entregado ?? req.body.totalentregado;
   const entregado = Number(totalentregado);
-  if (Number.isNaN(entregado) || entregado < 0)
+
+  if (isNaN(entregado) || entregado < 0)
     return res.status(400).json({ error: 'total_entregado debe ser un número válido' });
 
   try {
-    const { data: caja, error: cajaError } = await supabase
-      .from('caja_diaria')
-      .select('id, total_cobrado, base_entregada')
-      .eq('id', id)
-      .single();
-
-    if (cajaError) throw cajaError;
-
-    const diferencia =
-      Number(caja.total_cobrado || 0) + Number(caja.base_entregada || 0) - entregado;
-
+    // SOLO actualiza total_entregado. No toca diferencia ni ningún otro campo.
     const { error: updateError } = await supabase
       .from('caja_diaria')
-      .update({ total_entregado: entregado, diferencia })
+      .update({ total_entregado: entregado })
       .eq('id', id);
 
     if (updateError) throw updateError;
@@ -165,7 +156,6 @@ const editarMontoRecibido = async (req, res) => {
   }
 };
 
-// ─── RESUMEN ADMIN ────────────────────────────────────────────────────────────
 const getResumenCajaAdmin = async (req, res) => {
   const supabase = getSupabase();
   const fecha = toDateString(req.query.fecha);
@@ -173,7 +163,10 @@ const getResumenCajaAdmin = async (req, res) => {
   try {
     const { data: cajas, error: cajasError } = await supabase
       .from('caja_diaria')
-      .select('id, cobrador_id, fecha, base_entregada, total_cobrado, total_entregado, diferencia, usuarios!caja_diaria_cobrador_id_fkey(id, nombre)')
+      .select(`
+        id, cobrador_id, fecha, base_entregada, total_cobrado, total_entregado, diferencia,
+        usuarios!caja_diaria_cobrador_id_fkey(id, nombre)
+      `)
       .eq('fecha', fecha)
       .order('fecha', { ascending: false });
 
@@ -190,12 +183,10 @@ const getResumenCajaAdmin = async (req, res) => {
 
         const base = Number(caja.base_entregada) || 0;
         const cobrado = Number(caja.total_cobrado) || 0;
-        const entregado =
-          caja.total_entregado === null ? null : Number(caja.total_entregado);
-        const diferencia =
-          caja.diferencia === null
-            ? base + cobrado - (Number(caja.total_entregado) || 0)
-            : Number(caja.diferencia);
+        const entregado = caja.total_entregado === null ? null : Number(caja.total_entregado);
+        const diferencia = caja.diferencia === null
+          ? (base + cobrado - Number(caja.total_entregado || 0))
+          : Number(caja.diferencia);
 
         return {
           id: caja.id,
@@ -218,19 +209,19 @@ const getResumenCajaAdmin = async (req, res) => {
       })
     );
 
-    const totalBaseEntregada = cajasConPagos.reduce((s, c) => s + (c.base_entregada || 0), 0);
-    const totalCobrado = cajasConPagos.reduce((s, c) => s + (c.total_cobrado || 0), 0);
+    const totalBaseEntregada = cajasConPagos.reduce((s, c) => s + c.base_entregada, 0);
+    const totalCobrado = cajasConPagos.reduce((s, c) => s + c.total_cobrado, 0);
     const totalEntregado = cajasConPagos.reduce((s, c) => s + (c.total_entregado || 0), 0);
     const saldoCaja = totalBaseEntregada + totalCobrado - totalEntregado;
 
     return res.json({
       resumen: {
         fecha,
-        totalbaseentregada: totalBaseEntregada,
-        totalcobrado: totalCobrado,
-        totalentregado: totalEntregado,
-        saldocaja: saldoCaja,
-        totalcobradores: cajasConPagos.length,
+        total_base_entregada: totalBaseEntregada,
+        total_cobrado: totalCobrado,
+        total_entregado: totalEntregado,
+        saldo_caja: saldoCaja,
+        total_cobradores: cajasConPagos.length,
       },
       cajas: cajasConPagos,
     });
@@ -240,7 +231,6 @@ const getResumenCajaAdmin = async (req, res) => {
   }
 };
 
-// ─── HISTORIAL COBRADOR ───────────────────────────────────────────────────────
 const getHistorialCobrador = async (req, res) => {
   const supabase = getSupabase();
   const cobradorid = req.params.cobradorid ?? req.params.id;
@@ -248,7 +238,10 @@ const getHistorialCobrador = async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('caja_diaria')
-      .select('id, cobrador_id, fecha, base_entregada, total_cobrado, total_entregado, diferencia, usuarios!caja_diaria_cobrador_id_fkey(id, nombre)')
+      .select(`
+        id, cobrador_id, fecha, base_entregada, total_cobrado, total_entregado, diferencia,
+        usuarios!caja_diaria_cobrador_id_fkey(id, nombre)
+      `)
       .eq('cobrador_id', cobradorid)
       .order('fecha', { ascending: false });
 
@@ -272,7 +265,6 @@ const getHistorialCobrador = async (req, res) => {
   }
 };
 
-// ─── MI CAJA HOY (cobrador) ───────────────────────────────────────────────────
 const getMiCajaHoy = async (req, res) => {
   const supabase = getSupabase();
   const cobradorid = req.user.id;
@@ -302,32 +294,30 @@ const getMiCajaHoy = async (req, res) => {
       return res.json({
         tienecaja: false,
         fecha,
-        baseentregada: 0,
-        totalcobrado: 0,
-        totalentregado: 0,
+        base_entregada: 0,
+        total_cobrado: 0,
+        total_entregado: 0,
         diferencia: 0,
         pagosdeldia: [],
       });
     }
 
-    const pagosDelDia = (pagos ?? []).map((p) => ({
-      id: p.id,
-      prestamoid: p.prestamo_id,
-      montopagado: Number(p.monto_pagado) || 0,
-      fechapago: p.fecha_pago,
-      cobradorid: p.cobrador_id,
-    }));
-
     return res.json({
       tienecaja: true,
       id: caja.id,
-      cobradorid: caja.cobrador_id,
+      cobrador_id: caja.cobrador_id,
       fecha: caja.fecha,
-      baseentregada: Number(caja.base_entregada) || 0,
-      totalcobrado: Number(caja.total_cobrado) || 0,
-      totalentregado: caja.total_entregado === null ? 0 : Number(caja.total_entregado),
+      base_entregada: Number(caja.base_entregada) || 0,
+      total_cobrado: Number(caja.total_cobrado) || 0,
+      total_entregado: caja.total_entregado === null ? 0 : Number(caja.total_entregado),
       diferencia: caja.diferencia === null ? 0 : Number(caja.diferencia),
-      pagosdeldia: pagosDelDia,
+      pagosdeldia: (pagos ?? []).map((p) => ({
+        id: p.id,
+        prestamo_id: p.prestamo_id,
+        monto_pagado: Number(p.monto_pagado) || 0,
+        fecha_pago: p.fecha_pago,
+        cobrador_id: p.cobrador_id,
+      })),
     });
   } catch (error) {
     console.error('Error getMiCajaHoy:', error.message);

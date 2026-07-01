@@ -10,22 +10,29 @@ const createLoan = async (req, res) => {
 
   const responsableid = req.user.rol === 'admin' ? cobradorid : req.user.id;
   const montoPrestado = Number(montoprestado);
-  const montoTotalManual = montototal == null || montototal === '' ? null : Number(montototal);
+  const montoTotalManual = (montototal === null || montototal === undefined) ? null : Number(montototal);
   const diasPlazo = Number(diasplazo);
 
-  if (!clientenombre || clientenombre.trim().length < 3)
-    return res.status(400).json({ error: 'clientenombre es requerido (mín 3 caracteres)' });
+  // Trim correcto para nombres con letras latinas y tildes
+  const nombreTrimmed = (clientenombre ?? '').replace(/\s+/g, ' ').trim();
+  if (!nombreTrimmed || nombreTrimmed.length < 3)
+    return res.status(400).json({ error: 'clientenombre es requerido (mín. 3 caracteres)' });
+
   if (!responsableid)
     return res.status(400).json({ error: 'cobradorid es requerido' });
-  if (Number.isNaN(montoPrestado) || montoPrestado <= 0)
+
+  if (isNaN(montoPrestado) || montoPrestado <= 0)
     return res.status(400).json({ error: 'montoprestado inválido' });
-  if (Number.isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 60)
+
+  if (isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 60)
     return res.status(400).json({ error: 'El plazo debe ser entre 7 y 60 días' });
-  if (montoTotalManual !== null && (Number.isNaN(montoTotalManual) || montoTotalManual <= montoPrestado))
+
+  if (montoTotalManual !== null && (isNaN(montoTotalManual) || montoTotalManual <= montoPrestado))
     return res.status(400).json({ error: 'montototal debe ser mayor que montoprestado' });
 
   try {
     let rutaIdFinal = rutaid ?? null;
+
     if (!rutaIdFinal && rutanombre) {
       const { data: rutaExistente } = await supabase
         .from('rutas').select('id').ilike('nombre', rutanombre).maybeSingle();
@@ -41,21 +48,23 @@ const createLoan = async (req, res) => {
 
     if (rutaIdFinal) {
       await supabase.from('cobrador_rutas').insert({
-        cobrador_id: responsableid, ruta_id: rutaIdFinal,
+        cobrador_id: responsableid,
+        ruta_id: rutaIdFinal,
       });
-      // Se ignora el error de duplicado (unique constraint)
+      // ignoramos error de duplicado por unique constraint
     }
 
     const { data: clienteData, error: clienteError } = await supabase
       .from('clientes')
       .insert({
-        nombre: clientenombre.trim(),
+        nombre: nombreTrimmed,
         telefono: clientetelefono ?? null,
         direccion: clientedireccion ?? null,
         cobrador_id: responsableid,
         ruta_id: rutaIdFinal,
       })
-      .select().single();
+      .select()
+      .single();
 
     if (clienteError) throw clienteError;
 
@@ -78,7 +87,8 @@ const createLoan = async (req, res) => {
         fecha_fin: fechaFin.toISOString(),
         estado: 'activo',
       })
-      .select().single();
+      .select()
+      .single();
 
     if (prestamoError) throw prestamoError;
 
@@ -93,10 +103,9 @@ const createLoan = async (req, res) => {
   }
 };
 
-// ─── IMPORTAR MASIVO DESDE EXCEL/CSV ─────────────────────────────────────────
 const importarPrestamos = async (req, res) => {
   const supabase = getSupabase();
-  const { prestamos } = req.body;
+  const prestamos = req.body;
 
   if (!Array.isArray(prestamos) || prestamos.length === 0)
     return res.status(400).json({ error: 'Debes enviar un array de préstamos' });
@@ -106,28 +115,26 @@ const importarPrestamos = async (req, res) => {
 
   for (let i = 0; i < prestamos.length; i++) {
     const p = prestamos[i];
-    const fila = p._fila ?? i + 2;
+    const fila = p._fila ?? (i + 2);
     try {
-      const responsableid =
-        req.user.rol === 'admin'
-          ? (p.cobradorid ?? p.cobrador_id ?? req.user.id)
-          : req.user.id;
+      const responsableid = req.user.rol === 'admin'
+        ? (p.cobrador_id ?? p.cobradorid ?? req.user.id)
+        : req.user.id;
 
-      const montoPrestado = Number(p.montoprestado ?? p.monto_prestado);
-      const montoTotalRaw = p.montototal ?? p.monto_total;
-      const montoTotalFinal =
-        !montoTotalRaw || montoTotalRaw === '' ? montoPrestado * 1.2 : Number(montoTotalRaw);
-      const diasPlazo = Number(p.diasplazo ?? p.dias_plazo ?? 30);
+      const montoPrestado = Number(p.monto_prestado ?? p.montoprestado);
+      const montoTotalRaw = p.monto_total ?? p.montototal;
+      const montoTotalFinal = !montoTotalRaw ? montoPrestado * 1.2 : Number(montoTotalRaw);
+      const diasPlazo = Number(p.dias_plazo ?? p.diasplazo ?? 30);
+      const nombreTrimmed = String(p.clientenombre ?? '').replace(/\s+/g, ' ').trim();
 
-      if (!p.clientenombre || String(p.clientenombre).trim().length < 3)
-        throw new Error('clientenombre inválido');
-      if (Number.isNaN(montoPrestado) || montoPrestado <= 0)
-        throw new Error('montoprestado inválido');
-      if (Number.isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 60)
+      if (!nombreTrimmed || nombreTrimmed.length < 3) throw new Error('clientenombre inválido');
+      if (isNaN(montoPrestado) || montoPrestado <= 0) throw new Error('montoprestado inválido');
+      if (isNaN(diasPlazo) || diasPlazo < 7 || diasPlazo > 60)
         throw new Error('diasplazo debe ser entre 7 y 60');
 
-      let rutaIdFinal = p.rutaid ?? p.ruta_id ?? null;
-      const nombreRuta = p.rutanombre ?? p.ruta_nombre;
+      let rutaIdFinal = p.ruta_id ?? p.rutaid ?? null;
+      const nombreRuta = p.ruta_nombre ?? p.rutanombre;
+
       if (!rutaIdFinal && nombreRuta) {
         const { data: rutaExistente } = await supabase
           .from('rutas').select('id').ilike('nombre', nombreRuta).maybeSingle();
@@ -142,14 +149,15 @@ const importarPrestamos = async (req, res) => {
 
       if (rutaIdFinal && responsableid) {
         await supabase.from('cobrador_rutas').insert({
-          cobrador_id: responsableid, ruta_id: rutaIdFinal,
+          cobrador_id: responsableid,
+          ruta_id: rutaIdFinal,
         });
       }
 
       const { data: clienteData, error: clienteError } = await supabase
         .from('clientes')
         .insert({
-          nombre: String(p.clientenombre).trim(),
+          nombre: nombreTrimmed,
           telefono: p.clientetelefono ?? p.telefono ?? null,
           direccion: p.clientedireccion ?? p.direccion ?? null,
           cobrador_id: responsableid,
@@ -177,7 +185,7 @@ const importarPrestamos = async (req, res) => {
       });
 
       if (prestamoError) throw prestamoError;
-      creados.push(String(p.clientenombre).trim());
+      creados.push(nombreTrimmed);
     } catch (e) {
       errores.push({ fila, cliente: p.clientenombre ?? '?', error: e.message });
     }
@@ -194,12 +202,13 @@ const updateLoan = async (req, res) => {
   const supabase = getSupabase();
   const { id } = req.params;
   const { montoprestado, saldopendiente, fechafin } = req.body;
+
   const montoPrestado = Number(montoprestado);
   const saldoPendiente = Number(saldopendiente);
 
-  if (Number.isNaN(montoPrestado) || montoPrestado <= 0)
+  if (isNaN(montoPrestado) || montoPrestado <= 0)
     return res.status(400).json({ error: 'montoprestado inválido' });
-  if (Number.isNaN(saldoPendiente) || saldoPendiente < 0)
+  if (isNaN(saldoPendiente) || saldoPendiente < 0)
     return res.status(400).json({ error: 'saldopendiente inválido' });
   if (saldoPendiente > montoPrestado * 1.2)
     return res.status(400).json({ error: 'saldopendiente no puede superar el 120% del monto prestado' });
@@ -210,7 +219,6 @@ const updateLoan = async (req, res) => {
     const montoTotal = montoPrestado * 1.2;
     const { data: prestamoActual, error: fetchError } = await supabase
       .from('prestamos').select('id, fecha_inicio').eq('id', id).single();
-
     if (fetchError) throw fetchError;
 
     const diffMs =
