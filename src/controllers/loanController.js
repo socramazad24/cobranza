@@ -16,12 +16,10 @@ const createLoan = async (req, res) => {
   const montoTotalManual = (montototal === null || montototal === undefined) ? null : Number(montototal);
   const diasPlazo = Number(diasplazo);
 
-  // Validar frecuencia
   if (!['diario', 'semanal', 'quincenal', 'mensual'].includes(frecuencia)) {
     return res.status(400).json({ error: 'frecuencia debe ser: diario, semanal, quincenal o mensual' });
   }
 
-  // Trim correcto para nombres con letras latinas y tildes
   const nombreTrimmed = (clientenombre ?? '').replace(/\s+/g, ' ').trim();
   if (!nombreTrimmed || nombreTrimmed.length < 3)
     return res.status(400).json({ error: 'clientenombre es requerido (mín. 3 caracteres)' });
@@ -55,14 +53,12 @@ const createLoan = async (req, res) => {
     }
 
     if (rutaIdFinal) {
-      // upsert silencioso (ignora duplicados)
       await supabase.from('cobrador_rutas').upsert({
         cobrador_id: responsableid,
         ruta_id: rutaIdFinal,
       }, { onConflict: 'cobrador_id,ruta_id', ignoreDuplicates: true });
     }
 
-    // 1️⃣ Crear cliente
     const { data: clienteData, error: clienteError } = await supabase
       .from('clientes')
       .insert({
@@ -77,19 +73,16 @@ const createLoan = async (req, res) => {
 
     if (clienteError) throw clienteError;
 
-    // 2️⃣ Calcular según frecuencia
     const montoTotalFinal = montoTotalManual !== null ? montoTotalManual : montoPrestado * 1.2;
     const cuotaPorPeriodo = calcularCuota(montoTotalFinal, diasPlazo, frecuencia);
     const fechaInicio = new Date();
     const fechaFin = new Date();
     fechaFin.setDate(fechaInicio.getDate() + diasPlazo);
 
-    // 3️⃣ Generar calendario de pagos
     const cfg = getInfoFrecuencia(frecuencia);
     const numPagos = cfg.pagosPorPlazo(diasPlazo);
     const fechasPago = generarFechasPago(fechaInicio, frecuencia, diasPlazo);
 
-    // 4️⃣ Crear préstamo con frecuencia
     const { data: prestamoData, error: prestamoError } = await supabase
       .from('prestamos')
       .insert({
@@ -111,7 +104,6 @@ const createLoan = async (req, res) => {
 
     if (prestamoError) throw prestamoError;
 
-    // 5️⃣ Generar tabla de pagos programados
     const pagosProgramados = fechasPago.map((fecha, idx) => ({
       prestamo_id: prestamoData.id,
       numero_pago: idx + 1,
@@ -120,12 +112,9 @@ const createLoan = async (req, res) => {
       pagado: false,
     }));
 
-    // Intentar insertar (si la tabla existe)
     try {
       await supabase.from('pagos_programados').insert(pagosProgramados);
-    } catch (_) {
-      console.log('Tabla pagos_programados no existe, omitiendo');
-    }
+    } catch (_) {}
 
     return res.status(201).json({
       message: 'Préstamo creado exitosamente',
@@ -214,7 +203,6 @@ const importarPrestamos = async (req, res) => {
 
       if (clienteError) throw clienteError;
 
-      // Calcular con frecuencia
       const cuotaPorPeriodo = calcularCuota(montoTotalFinal, diasPlazo, frecuencia);
       const cfg = getInfoFrecuencia(frecuencia);
       const numPagos = cfg.pagosPorPlazo(diasPlazo);
@@ -272,7 +260,7 @@ const updateLoan = async (req, res) => {
   try {
     const montoTotal = montoPrestado * 1.2;
     const { data: prestamoActual, error: fetchError } = await supabase
-      .from('prestamos').select('id, fecha_inicio, frecuencia, dias_plazo, total_pagos_programados').eq('id', id).single();
+      .from('prestamos').select('id, fecha_inicio, frecuencia').eq('id', id).single();
     if (fetchError) throw fetchError;
 
     const frecuencia = prestamoActual.frecuencia || 'diario';
@@ -338,34 +326,17 @@ const getLoansByCobrador = async (req, res) => {
     const { data, error } = await supabase
       .from("prestamos")
       .select(`
-        id,
-        cliente_id,
-        cobrador_id,
-        monto_prestado,
-        monto_total,
-        saldo_pendiente,
-        cuota_diaria,
-        fecha_inicio,
-        fecha_fin,
-        estado,
-        frecuencia,
-        total_pagos_programados,
-        pagos_realizados,
+        id, cliente_id, cobrador_id,
+        monto_prestado, monto_total, saldo_pendiente, cuota_diaria,
+        fecha_inicio, fecha_fin, estado, frecuencia,
+        total_pagos_programados, pagos_realizados,
         created_at,
         clientes (
-          id,
-          nombre,
-          telefono,
-          direccion,
-          ruta_id,
-          rutas (
-            id,
-            nombre
-          )
+          id, nombre, telefono, direccion, ruta_id,
+          rutas ( id, nombre )
         ),
         usuarios!prestamos_cobrador_id_fkey (
-          id,
-          nombre
+          id, nombre
         )
       `)
       .eq("cobrador_id", cobradorId)
@@ -411,13 +382,12 @@ const getCalendarioPagos = async (req, res) => {
   try {
     const { data: prestamo, error: prestamoError } = await supabase
       .from('prestamos')
-      .select('frecuencia, cuota_diaria, total_pagos_programados, fecha_inicio, fecha_fin, monto_total, pagos_realizados, dias_plazo')
+      .select('frecuencia, cuota_diaria, total_pagos_programados, fecha_inicio, fecha_fin, monto_total, pagos_realizados')
       .eq('id', prestamoid)
       .single();
 
     if (prestamoError) throw prestamoError;
 
-    // Intentar leer pagos programados
     let pagosProgramados = [];
     try {
       const { data } = await supabase
@@ -427,7 +397,6 @@ const getCalendarioPagos = async (req, res) => {
         .order('numero_pago');
       pagosProgramados = data ?? [];
     } catch (_) {
-      // generar en vivo si la tabla no existe
       const cfg = getInfoFrecuencia(prestamo.frecuencia || 'diario');
       const totalPagos = prestamo.total_pagos_programados || cfg.pagosPorPlazo(
         Math.ceil((new Date(prestamo.fecha_fin) - new Date(prestamo.fecha_inicio)) / (1000 * 60 * 60 * 24))
@@ -460,6 +429,132 @@ const getCalendarioPagos = async (req, res) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════
+//  🆕 BUSCAR PRÉSTAMOS - Esta es la función que faltaba
+// ═══════════════════════════════════════════════════════════════════
+const buscarPrestamos = async (req, res) => {
+  const supabase = getSupabase();
+  const query = req.query.q?.toString().trim() || '';
+  const rol = req.user.rol;
+  const userId = req.user.id;
+
+  console.log('🔍 buscarPrestamos query:', JSON.stringify(query));
+
+  if (query.length < 2) {
+    return res.json([]);
+  }
+
+  try {
+    // PASO 1: Buscar IDs de clientes que coincidan
+    const { data: clientesData, error: clientesError } = await supabase
+      .from('clientes')
+      .select('id, nombre, telefono, ruta_id')
+      .or(`nombre.ilike.%${query}%,telefono.ilike.%${query}%`);
+
+    if (clientesError) {
+      console.error('❌ Error buscando clientes:', clientesError);
+      throw clientesError;
+    }
+
+    const clienteIds = (clientesData ?? []).map(c => c.id);
+    const clientesMap = {};
+    for (const c of (clientesData ?? [])) {
+      clientesMap[c.id] = c;
+    }
+    console.log(`👥 Clientes encontrados: ${clienteIds.length}`);
+
+    // PASO 2: Buscar IDs de cobradores que coincidan (solo admin)
+    let cobradorIds = [];
+    let cobradoresMap = {};
+    if (rol === 'admin') {
+      const { data: cobradoresData } = await supabase
+        .from('usuarios')
+        .select('id, nombre')
+        .eq('rol', 'cobrador')
+        .ilike('nombre', `%${query}%`);
+
+      cobradorIds = (cobradoresData ?? []).map(c => c.id);
+      for (const c of (cobradoresData ?? [])) {
+        cobradoresMap[c.id] = c.nombre;
+      }
+      console.log(`🏍 Cobradores encontrados: ${cobradorIds.length}`);
+    }
+
+    // PASO 3: Construir query de préstamos
+    const orFilters = [];
+    if (clienteIds.length > 0) {
+      orFilters.push(`cliente_id.in.(${clienteIds.join(',')})`);
+    }
+    if (cobradorIds.length > 0) {
+      orFilters.push(`cobrador_id.in.(${cobradorIds.join(',')})`);
+    }
+
+    if (orFilters.length === 0) {
+      console.log('⚠️ Sin coincidencias en clientes ni cobradores');
+      return res.json([]);
+    }
+
+    let prestamosQuery = supabase
+      .from('prestamos')
+      .select('id, monto_prestado, monto_total, saldo_pendiente, cuota_diaria, fecha_inicio, fecha_fin, estado, frecuencia, cobrador_id, cliente_id')
+      .or(orFilters.join(','))
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    // Si no es admin, solo sus préstamos
+    if (rol !== 'admin') {
+      prestamosQuery = prestamosQuery.eq('cobrador_id', userId);
+    }
+
+    const { data: prestamosData, error: prestamosError } = await prestamosQuery;
+
+    if (prestamosError) {
+      console.error('❌ Error buscando préstamos:', prestamosError);
+      throw prestamosError;
+    }
+
+    console.log(`💼 Préstamos encontrados: ${prestamosData?.length ?? 0}`);
+
+    // PASO 4: Traer las rutas
+    const rutaIds = [...new Set((clientesData ?? []).map(c => c.ruta_id).filter(id => id != null))];
+    let rutasMap = {};
+    if (rutaIds.length > 0) {
+      const { data: rutasData } = await supabase
+        .from('rutas')
+        .select('id, nombre')
+        .in('id', rutaIds);
+      for (const r of (rutasData ?? [])) {
+        rutasMap[r.id] = r.nombre;
+      }
+    }
+
+    const prestamos = (prestamosData ?? []).map(p => {
+      const cliente = clientesMap[p.cliente_id] || {};
+      return {
+        id: p.id,
+        cliente_id: p.cliente_id,
+        cliente_nombre: cliente.nombre ?? 'Sin cliente',
+        cliente_telefono: cliente.telefono ?? '',
+        ruta_nombre: cliente.ruta_id ? (rutasMap[cliente.ruta_id] ?? 'Sin ruta') : 'Sin ruta',
+        cobrador_nombre: cobradoresMap[p.cobrador_id] ?? 'Cobrador',
+        monto_total: Number(p.monto_total) || 0,
+        saldo_pendiente: Number(p.saldo_pendiente) || 0,
+        cuota_diaria: Number(p.cuota_diaria) || 0,
+        estado: p.estado ?? 'activo',
+        frecuencia: p.frecuencia ?? 'diario',
+      };
+    });
+
+    return res.json(prestamos);
+  } catch (error) {
+    console.error('❌ Error buscarPrestamos:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+//  EXPORTAR
+// ═══════════════════════════════════════════════════════════════════
 module.exports = {
   createLoan,
   updateLoan,
@@ -467,4 +562,5 @@ module.exports = {
   importarPrestamos,
   getLoansByCobrador,
   getCalendarioPagos,
+  buscarPrestamos,  // 🆕 ESTA LÍNEA ES LA QUE FALTABA
 };

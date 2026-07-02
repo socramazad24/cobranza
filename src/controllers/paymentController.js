@@ -13,9 +13,10 @@ const registerPayment = async (req, res) => {
     return res.status(400).json({ error: 'monto_pagado debe ser mayor a 0' });
 
   try {
+    // 1. Obtener el préstamo
     const { data: prestamo, error: fetchError } = await supabase
       .from('prestamos')
-      .select('id, saldo_pendiente, estado, cobrador_id')
+      .select('id, saldo_pendiente, estado, cobrador_id, frecuencia, total_pagos_programados, pagos_realizados')
       .eq('id', prestamoid)
       .single();
 
@@ -34,16 +35,20 @@ const registerPayment = async (req, res) => {
         saldo_pendiente: saldoActual,
       });
 
-    // 1. Registrar el pago
+    // 2. Registrar el pago en la tabla 'pagos'
     const { data: pago, error: pagoError } = await supabase
       .from('pagos')
-      .insert({ prestamo_id: prestamoid, cobrador_id: cobradorid, monto_pagado: montoIngresado })
+      .insert({
+        prestamo_id: prestamoid,
+        cobrador_id: cobradorid,
+        monto_pagado: montoIngresado,
+      })
       .select()
       .single();
 
     if (pagoError) throw pagoError;
 
-    // 2. Actualizar saldo del préstamo
+    // 3. Actualizar saldo y estado del préstamo
     const nuevoSaldo = saldoActual - montoIngresado;
     const saldoFinal = nuevoSaldo < 0 ? 0 : nuevoSaldo;
     const nuevoEstado = saldoFinal === 0 ? 'pagado' : 'activo';
@@ -55,7 +60,109 @@ const registerPayment = async (req, res) => {
 
     if (updatePrestamoError) throw updatePrestamoError;
 
-    // 3. 🆕 AUTO-CREAR o ACTUALIZAR caja del día
+    // ═══════════════════════════════════════════════════════════════
+    // 4. Marcar pagos programados como pagados (CON LOGGING)
+    // ═══════════════════════════════════════════════════════════════
+    try {
+      const hoy = new Date().toISOString().split('T')[0];
+      console.log(`🔍 [PP] === INICIO marcar pagos programados ===`);
+      console.log(`🔍 [PP] Préstamo ID: ${prestamoid}, Fecha hoy: ${hoy}`);
+
+      // Ver todos los pagos programados del préstamo
+      const { data: todosPP, error: errTodos } = await supabase
+        .from('pagos_programados')
+        .select('id, numero_pago, fecha_programada, monto_esperado, pagado')
+        .eq('prestamo_id', prestamoid)
+        .order('numero_pago', { ascending: true });
+
+      if (errTodos) {
+        console.log(`❌ [PP] Error al buscar todos: ${errTodos.message}`);
+      } else {
+        console.log(`🔍 [PP] Total pagos programados: ${todosPP?.length ?? 0}`);
+        if (todosPP && todosPP.length > 0) {
+          for (const pp of todosPP) {
+            console.log(`  → #${pp.numero_pago}: ${pp.fecha_programada} | pagado=${pp.pagado} | $${pp.monto_esperado}`);
+          }
+        }
+      }
+
+      // Buscar SOLO los pendientes
+      const { data: ppPendientes, error: ppErr } = await supabase
+        .from('pagos_programados')
+        .select('id, numero_pago, fecha_programada, monto_esperado')
+        .eq('prestamo_id', prestamoid)
+        .eq('pagado', false)
+        .order('numero_pago', { ascending: true });
+
+      if (ppErr) {
+        console.log(`❌ [PP] Error al buscar pendientes: ${ppErr.message}`);
+      } else {
+        console.log(`🔍 [PP] Pagos PENDIENTES: ${ppPendientes?.length ?? 0}`);
+
+        if (ppPendientes && ppPendientes.length > 0) {
+          // Marcar los que correspondan a hoy o antes
+          const ppAMarcar = ppPendientes
+            .filter(pp => pp.fecha_programada <= hoy)
+            .map(pp => pp.id);
+
+          console.log(`🔍 [PP] IDs a marcar (fechas <= ${hoy}): [${ppAMarcar.join(', ')}]`);
+
+          if (ppAMarcar.length > 0) {
+            const { data: updated, error: updatePPError } = await supabase
+              .from('pagos_programados')
+              .update({
+                pagado: true,
+                fecha_pago_real: new Date().toISOString(),
+              })
+              .in('id', ppAMarcar)
+              .select();
+
+            if (updatePPError) {
+              console.log(`❌ [PP] Error al actualizar: ${updatePPError.message}`);
+            } else {
+              console.log(`✅ [PP] ${updated?.length ?? 0} pago(s) actualizado(s)`);
+              if (updated) {
+                for (const u of updated) {
+                  console.log(`  ✓ #${u.numero_pago} ahora pagado=${u.pagado}`);
+                }
+              }
+            }
+          } else {
+            console.log(`⚠️ [PP] No hay pagos con fecha <= ${hoy} para marcar`);
+          }
+        }
+      }
+
+      // Actualizar contador en el préstamo
+      const { count: totalPagados, error: countErr } = await supabase
+        .from('pagos_programados')
+        .select('id', { count: 'exact', head: true })
+        .eq('prestamo_id', prestamoid)
+        .eq('pagado', true);
+
+      if (countErr) {
+        console.log(`❌ [PP] Error al contar: ${countErr.message}`);
+      } else {
+        const { error: updateCountErr } = await supabase
+          .from('prestamos')
+          .update({ pagos_realizados: totalPagados ?? 0 })
+          .eq('id', prestamoid);
+
+        if (updateCountErr) {
+          console.log(`❌ [PP] Error al actualizar contador: ${updateCountErr.message}`);
+        } else {
+          console.log(`✅ [PP] Contador: ${totalPagados} pagos realizados`);
+        }
+      }
+
+      console.log(`🔍 [PP] === FIN ===`);
+    } catch (ppError) {
+      console.log(`❌ [PP] Error general: ${ppError.message}`);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 5. Crear o actualizar caja del día
+    // ═══════════════════════════════════════════════════════════════
     const fecha = new Date().toISOString().split('T')[0];
 
     const { data: cajaExistente, error: cajaError } = await supabase
@@ -71,8 +178,6 @@ const registerPayment = async (req, res) => {
     let cajaAccion = 'actualizada';
 
     if (!cajaExistente) {
-      // 🆕 CREAR caja automáticamente con el primer pago del día
-      // base = 0, total_cobrado = montoIngresado, total_entregado = 0, diferencia = montoIngresado
       const { data: nuevaCaja, error: insertCajaError } = await supabase
         .from('caja_diaria')
         .insert({
@@ -80,8 +185,8 @@ const registerPayment = async (req, res) => {
           fecha,
           base_entregada: 0,
           total_cobrado: montoIngresado,
-          total_entregado: 0,  // 🔑 ABIERTA (NO cerrada)
-          diferencia: montoIngresado,  // pendiente = cobrado - entregado
+          total_entregado: 0,
+          diferencia: montoIngresado,
         })
         .select()
         .single();
@@ -90,28 +195,25 @@ const registerPayment = async (req, res) => {
       cajaResult = nuevaCaja;
       cajaAccion = 'creada';
     } else {
-      // Actualizar caja existente
       const baseEntregada = Number(cajaExistente.base_entregada) || 0;
       const nuevoTotalCobrado = (Number(cajaExistente.total_cobrado) || 0) + montoIngresado;
       const totalEntregado = cajaExistente.total_entregado === null
         ? null
         : Number(cajaExistente.total_entregado);
 
-      // Si la caja ya estaba cerrada, la REABRIMOS automáticamente
-      // porque hay nuevo cobro
       const cajaCerrada = totalEntregado !== null;
       const nuevoTotalEntregado = cajaCerrada ? 0 : totalEntregado;
       const nuevaDiferencia = cajaCerrada
-        ? baseEntregada + nuevoTotalCobrado  // Reabierta, todo está pendiente
+        ? baseEntregada + nuevoTotalCobrado
         : baseEntregada + nuevoTotalCobrado - (totalEntregado || 0);
 
       const { data: cajaActualizada, error: updateCajaError } = await supabase
         .from('caja_diaria')
         .update({
           total_cobrado: nuevoTotalCobrado,
-          total_entregado: nuevoTotalEntregado,  // null si se reabre
+          total_entregado: nuevoTotalEntregado,
           diferencia: nuevaDiferencia,
-          cerrado_por: cajaCerrada ? null : cajaExistente.cerrado_por,  // Limpiar si se reabre
+          cerrado_por: cajaCerrada ? null : cajaExistente.cerrado_por,
         })
         .eq('id', cajaExistente.id)
         .select()
@@ -174,7 +276,7 @@ const getActiveLoans = async (req, res) => {
     .from('prestamos')
     .select(`
       id, monto_prestado, monto_total, saldo_pendiente, cuota_diaria,
-      fecha_inicio, fecha_fin, estado, cobrador_id,
+      fecha_inicio, fecha_fin, estado, cobrador_id, frecuencia,
       usuarios!prestamos_cobrador_id_fkey(nombre),
       clientes(id, nombre, telefono, rutas(id, nombre))
     `)
@@ -255,7 +357,6 @@ const renewLoan = async (req, res) => {
   }
 };
 
-// 🆕 Obtiene los pagos que ya se hicieron HOY a un préstamo específico
 const getPagosDelDia = async (req, res) => {
   const supabase = getSupabase();
   const prestamoid = req.params.prestamoid;
@@ -280,8 +381,6 @@ const getPagosDelDia = async (req, res) => {
 
     if (error) throw error;
 
-    console.log('📅 Pagos de hoy para préstamo', prestamoid, ':', data);
-
     const pagosCobrador = (data ?? []).filter(p =>
       String(p.cobrador_id) === String(cobradorid) || req.user.rol === 'admin'
     );
@@ -290,9 +389,7 @@ const getPagosDelDia = async (req, res) => {
       (sum, p) => sum + Number(p.monto_pagado || 0), 0
     );
 
-    console.log('💰 Total cobrado hoy:', totalCobradoHoy, 'tipo:', typeof totalCobradoHoy);
-
-    const response = {
+    return res.json({
       prestamo_id: prestamoid,
       fecha: hoy.toISOString().split('T')[0],
       total_cobrado_hoy: totalCobradoHoy,
@@ -302,22 +399,17 @@ const getPagosDelDia = async (req, res) => {
         monto: Number(p.monto_pagado) || 0,
         fecha: p.fecha_pago,
       })),
-    };
-
-    console.log('📤 Enviando:', response);
-    return res.json(response);
+    });
   } catch (error) {
     console.error('Error getPagosDelDia:', error.message);
     return res.status(400).json({ error: error.message });
   }
 };
 
-
-// En el module.exports al final del archivo, agrega:
 module.exports = {
   registerPayment,
   getPaymentHistory,
   getActiveLoans,
   renewLoan,
-  getPagosDelDia,  // 🆕
+  getPagosDelDia,
 };

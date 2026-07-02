@@ -1,3 +1,4 @@
+// src/controllers/clientController.js
 const getSupabase = require('../config/supabaseClient');
 
 const getClientes = async (req, res) => {
@@ -8,25 +9,84 @@ const getClientes = async (req, res) => {
     ? req.query.cobradorid
     : (req.query.cobradorid || usuarioid);
 
+  // Búsqueda por texto
+  const search = (req.query.search || req.query.q || '').toString().trim();
+
+  console.log('🔍 getClientes - search:', JSON.stringify(search), 'cobrador:', filtrocobrador);
+
   try {
+    // PASO 1: Búsqueda simple SIN joins (más confiable)
     let query = supabase
       .from('clientes')
-      .select(`
-        id, nombre, telefono, direccion, informacion_contacto, created_at,
-        cobrador_id, ruta_id,
-        usuarios!clientes_cobrador_id_fkey ( id, nombre ),
-        rutas ( id, nombre ),
-        prestamos ( id, estado, saldo_pendiente, monto_total, fecha_fin )
-      `)
+      .select('id, nombre, telefono, direccion, informacion_contacto, created_at, cobrador_id, ruta_id')
       .order('nombre', { ascending: true });
 
-    if (filtrocobrador) query = query.eq('cobrador_id', filtrocobrador);
+    if (filtrocobrador) {
+      query = query.eq('cobrador_id', filtrocobrador);
+    }
+
+    if (search.length >= 2) {
+      const searchPattern = `%${search}%`;
+      query = query.or(`nombre.ilike.${searchPattern},telefono.ilike.${searchPattern},direccion.ilike.${searchPattern}`);
+    }
 
     const { data, error } = await query;
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      console.error('❌ Error en getClientes:', error);
+      return res.status(400).json({ error: error.message });
+    }
 
-    const clientes = (data ?? []).map(c => {
-      const prestamos = c.prestamos ?? [];
+    if (!data || data.length === 0) {
+      console.log('📊 Sin resultados');
+      return res.json([]);
+    }
+
+    // PASO 2: Traer los nombres de cobradores MANUALMENTE
+    const cobradoresIds = [...new Set(data.map(c => c.cobrador_id).filter(id => id != null))];
+    let cobradoresMap = {};
+    if (cobradoresIds.length > 0) {
+      const { data: cobradoresData } = await supabase
+        .from('usuarios')
+        .select('id, nombre')
+        .in('id', cobradoresIds);
+      for (const c of (cobradoresData ?? [])) {
+        cobradoresMap[c.id] = c.nombre;
+      }
+    }
+
+    // PASO 3: Traer los nombres de rutas MANUALMENTE
+    const rutasIds = [...new Set(data.map(c => c.ruta_id).filter(id => id != null))];
+    let rutasMap = {};
+    if (rutasIds.length > 0) {
+      const { data: rutasData } = await supabase
+        .from('rutas')
+        .select('id, nombre')
+        .in('id', rutasIds);
+      for (const r of (rutasData ?? [])) {
+        rutasMap[r.id] = r.nombre;
+      }
+    }
+
+    // PASO 4: Traer los préstamos de los clientes
+    const clienteIds = data.map(c => c.id);
+    let prestamosPorCliente = {};
+    if (clienteIds.length > 0) {
+      const { data: prestamosData } = await supabase
+        .from('prestamos')
+        .select('id, estado, saldo_pendiente, monto_total, cliente_id')
+        .in('cliente_id', clienteIds);
+      
+      for (const p of (prestamosData ?? [])) {
+        if (!prestamosPorCliente[p.cliente_id]) {
+          prestamosPorCliente[p.cliente_id] = [];
+        }
+        prestamosPorCliente[p.cliente_id].push(p);
+      }
+    }
+
+    // PASO 5: Armar respuesta
+    const clientes = data.map(c => {
+      const prestamos = prestamosPorCliente[c.id] || [];
       const activos = prestamos.filter(p => p.estado === 'activo' || p.estado === 'mora');
       const saldopendiente = activos.reduce((sum, p) => sum + Number(p.saldo_pendiente || 0), 0);
       const tienemora = prestamos.some(p => p.estado === 'mora');
@@ -38,9 +98,9 @@ const getClientes = async (req, res) => {
         informacioncontacto: c.informacion_contacto,
         createdat: c.created_at,
         cobradorid: c.cobrador_id,
-        cobradornombre: c.usuarios?.nombre ?? 'Sin cobrador',
+        cobradornombre: cobradoresMap[c.cobrador_id] ?? 'Sin cobrador',  // 🆕 Ahora sí muestra el nombre
         rutaid: c.ruta_id,
-        rutanombre: c.rutas?.nombre ?? 'Sin ruta',
+        rutanombre: rutasMap[c.ruta_id] ?? 'Sin ruta',
         totalprestamos: prestamos.length,
         prestamosactivos: activos.length,
         saldopendiente,
@@ -48,20 +108,31 @@ const getClientes = async (req, res) => {
       };
     });
 
+    console.log(`📊 Clientes devueltos: ${clientes.length}`);
     return res.json(clientes);
   } catch (err) {
+    console.error('❌ Error en getClientes:', err);
     return res.status(500).json({ error: err.message });
   }
 };
 
 const getCobradores = async (req, res) => {
   const supabase = getSupabase();
+  const search = (req.query.search || req.query.q || '').toString().trim();
+
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('usuarios')
       .select('id, nombre')
       .eq('rol', 'cobrador')
       .order('nombre');
+
+    // 🆕 Si hay búsqueda, filtrar
+    if (search.length >= 2) {
+      query = query.ilike('nombre', `%${search}%`);
+    }
+
+    const { data, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
     return res.json(data ?? []);
   } catch (err) {
@@ -78,7 +149,6 @@ const deleteClientes = async (req, res) => {
   }
 
   try {
-    // Verificar que los clientes existen
     const { data: clientesExisten, error: checkError } = await supabase
       .from('clientes')
       .select('id')
@@ -90,14 +160,6 @@ const deleteClientes = async (req, res) => {
       return res.status(404).json({ error: 'No se encontraron los clientes indicados' });
     }
 
-    // Los préstamos tienen on delete CASCADE desde clientes,
-    // y pagos + observaciones tienen on delete CASCADE desde préstamos,
-    // así que basta con borrar los clientes directamente.
-    // Solo necesitamos borrar préstamos explícitamente porque Supabase JS
-    // no siempre ejecuta el CASCADE en queries encadenadas por la API.
-    // Hacemos el borrado manual para mayor control y logging.
-
-    // 1. Obtener IDs de préstamos de esos clientes
     const { data: prestamos, error: prestamosError } = await supabase
       .from('prestamos')
       .select('id')
@@ -108,21 +170,18 @@ const deleteClientes = async (req, res) => {
     if (prestamos && prestamos.length > 0) {
       const prestamoIds = prestamos.map(p => p.id);
 
-      // 2. Borrar pagos (tiene on delete CASCADE pero lo hacemos explícito)
       const { error: pagosError } = await supabase
         .from('pagos')
         .delete()
         .in('prestamo_id', prestamoIds);
       if (pagosError) throw pagosError;
 
-      // 3. Borrar observaciones (tiene on delete CASCADE pero lo hacemos explícito)
       const { error: obsError } = await supabase
         .from('observaciones')
         .delete()
         .in('referencia_id', prestamoIds);
       if (obsError) throw obsError;
 
-      // 4. Borrar préstamos
       const { error: delPrestamosError } = await supabase
         .from('prestamos')
         .delete()
@@ -130,7 +189,6 @@ const deleteClientes = async (req, res) => {
       if (delPrestamosError) throw delPrestamosError;
     }
 
-    // 5. Borrar los clientes
     const { error: delClientesError } = await supabase
       .from('clientes')
       .delete()
