@@ -200,11 +200,14 @@ const getPaymentHistory = async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 //  🆕 GET ACTIVE LOANS  —  Modificado con cobrado_hoy + filtro cliente
 // ═══════════════════════════════════════════════════════════════
+// src/controllers/paymentController.js
+// Busca la función getActiveLoans y reemplázala por esta:
+
 const getActiveLoans = async (req, res) => {
   const supabase = getSupabase();
   const cobradorid = req.user.id;
   const rol = req.user.rol;
-  const clienteId = req.query.cliente_id; // 🆕 Filtro por cliente
+  const clienteId = req.query.cliente_id;
 
   let query = supabase
     .from('prestamos')
@@ -215,15 +218,16 @@ const getActiveLoans = async (req, res) => {
       clientes(id, nombre, telefono, rutas(id, nombre))
     `)
     .eq('estado', 'activo')
+    // 🆕 Ordenar por fecha de inicio descendente (más recientes primero)
     .order('fecha_inicio', { ascending: false });
 
   if (rol !== 'admin') query = query.eq('cobrador_id', cobradorid);
-  if (clienteId) query = query.eq('cliente_id', clienteId); // 🆕
+  if (clienteId) query = query.eq('cliente_id', clienteId);
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
 
-  // 🆕 Calcular cobrado_hoy
+  // Calcular cobrado_hoy
   const fechaHoy = new Date().toISOString().split('T')[0];
   const prestamoIds = (data ?? []).map(p => p.id);
   
@@ -253,7 +257,6 @@ const getActiveLoans = async (req, res) => {
     rutanombre: p.clientes?.rutas?.nombre ?? null,
     clienteid: p.cliente_id,
     frecuencia: p.frecuencia || 'diario',
-    // 🆕 CAMPOS NUEVOS
     cobrado_hoy: pagosHoyPorPrestamo[p.id]?.total ?? 0,
     cantidad_pagos_hoy: pagosHoyPorPrestamo[p.id]?.cantidad ?? 0,
     ya_cobrado_hoy: (pagosHoyPorPrestamo[p.id]?.cantidad ?? 0) > 0,
@@ -261,6 +264,7 @@ const getActiveLoans = async (req, res) => {
 
   return res.json(prestamos);
 };
+
 
 const renewLoan = async (req, res) => {
   const supabase = getSupabase();
