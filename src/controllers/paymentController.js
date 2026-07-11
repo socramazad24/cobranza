@@ -13,7 +13,6 @@ const registerPayment = async (req, res) => {
     return res.status(400).json({ error: 'monto_pagado debe ser mayor a 0' });
 
   try {
-    // 1. Obtener el préstamo
     const { data: prestamo, error: fetchError } = await supabase
       .from('prestamos')
       .select('id, saldo_pendiente, estado, cobrador_id, frecuencia, total_pagos_programados, pagos_realizados')
@@ -35,7 +34,6 @@ const registerPayment = async (req, res) => {
         saldo_pendiente: saldoActual,
       });
 
-    // 2. Registrar el pago en la tabla 'pagos'
     const { data: pago, error: pagoError } = await supabase
       .from('pagos')
       .insert({
@@ -48,7 +46,6 @@ const registerPayment = async (req, res) => {
 
     if (pagoError) throw pagoError;
 
-    // 3. Actualizar saldo y estado del préstamo
     const nuevoSaldo = saldoActual - montoIngresado;
     const saldoFinal = nuevoSaldo < 0 ? 0 : nuevoSaldo;
     const nuevoEstado = saldoFinal === 0 ? 'pagado' : 'activo';
@@ -60,33 +57,8 @@ const registerPayment = async (req, res) => {
 
     if (updatePrestamoError) throw updatePrestamoError;
 
-    // ═══════════════════════════════════════════════════════════════
-    // 4. Marcar pagos programados como pagados (CON LOGGING)
-    // ═══════════════════════════════════════════════════════════════
     try {
       const hoy = new Date().toISOString().split('T')[0];
-      console.log(`🔍 [PP] === INICIO marcar pagos programados ===`);
-      console.log(`🔍 [PP] Préstamo ID: ${prestamoid}, Fecha hoy: ${hoy}`);
-
-      // Ver todos los pagos programados del préstamo
-      const { data: todosPP, error: errTodos } = await supabase
-        .from('pagos_programados')
-        .select('id, numero_pago, fecha_programada, monto_esperado, pagado')
-        .eq('prestamo_id', prestamoid)
-        .order('numero_pago', { ascending: true });
-
-      if (errTodos) {
-        console.log(`❌ [PP] Error al buscar todos: ${errTodos.message}`);
-      } else {
-        console.log(`🔍 [PP] Total pagos programados: ${todosPP?.length ?? 0}`);
-        if (todosPP && todosPP.length > 0) {
-          for (const pp of todosPP) {
-            console.log(`  → #${pp.numero_pago}: ${pp.fecha_programada} | pagado=${pp.pagado} | $${pp.monto_esperado}`);
-          }
-        }
-      }
-
-      // Buscar SOLO los pendientes
       const { data: ppPendientes, error: ppErr } = await supabase
         .from('pagos_programados')
         .select('id, numero_pago, fecha_programada, monto_esperado')
@@ -94,75 +66,33 @@ const registerPayment = async (req, res) => {
         .eq('pagado', false)
         .order('numero_pago', { ascending: true });
 
-      if (ppErr) {
-        console.log(`❌ [PP] Error al buscar pendientes: ${ppErr.message}`);
-      } else {
-        console.log(`🔍 [PP] Pagos PENDIENTES: ${ppPendientes?.length ?? 0}`);
+      if (!ppErr && ppPendientes && ppPendientes.length > 0) {
+        const ppAMarcar = ppPendientes
+          .filter(pp => pp.fecha_programada <= hoy)
+          .map(pp => pp.id);
 
-        if (ppPendientes && ppPendientes.length > 0) {
-          // Marcar los que correspondan a hoy o antes
-          const ppAMarcar = ppPendientes
-            .filter(pp => pp.fecha_programada <= hoy)
-            .map(pp => pp.id);
-
-          console.log(`🔍 [PP] IDs a marcar (fechas <= ${hoy}): [${ppAMarcar.join(', ')}]`);
-
-          if (ppAMarcar.length > 0) {
-            const { data: updated, error: updatePPError } = await supabase
-              .from('pagos_programados')
-              .update({
-                pagado: true,
-                fecha_pago_real: new Date().toISOString(),
-              })
-              .in('id', ppAMarcar)
-              .select();
-
-            if (updatePPError) {
-              console.log(`❌ [PP] Error al actualizar: ${updatePPError.message}`);
-            } else {
-              console.log(`✅ [PP] ${updated?.length ?? 0} pago(s) actualizado(s)`);
-              if (updated) {
-                for (const u of updated) {
-                  console.log(`  ✓ #${u.numero_pago} ahora pagado=${u.pagado}`);
-                }
-              }
-            }
-          } else {
-            console.log(`⚠️ [PP] No hay pagos con fecha <= ${hoy} para marcar`);
-          }
+        if (ppAMarcar.length > 0) {
+          await supabase
+            .from('pagos_programados')
+            .update({ pagado: true, fecha_pago_real: new Date().toISOString() })
+            .in('id', ppAMarcar);
         }
       }
 
-      // Actualizar contador en el préstamo
-      const { count: totalPagados, error: countErr } = await supabase
+      const { count: totalPagados } = await supabase
         .from('pagos_programados')
         .select('id', { count: 'exact', head: true })
         .eq('prestamo_id', prestamoid)
         .eq('pagado', true);
 
-      if (countErr) {
-        console.log(`❌ [PP] Error al contar: ${countErr.message}`);
-      } else {
-        const { error: updateCountErr } = await supabase
-          .from('prestamos')
-          .update({ pagos_realizados: totalPagados ?? 0 })
-          .eq('id', prestamoid);
-
-        if (updateCountErr) {
-          console.log(`❌ [PP] Error al actualizar contador: ${updateCountErr.message}`);
-        } else {
-          console.log(`✅ [PP] Contador: ${totalPagados} pagos realizados`);
-        }
-      }
-
-      console.log(`🔍 [PP] === FIN ===`);
+      await supabase
+        .from('prestamos')
+        .update({ pagos_realizados: totalPagados ?? 0 })
+        .eq('id', prestamoid);
     } catch (ppError) {
       console.log(`❌ [PP] Error general: ${ppError.message}`);
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // 5. Crear o actualizar caja del día
-    // ═══════════════════════════════════════════════════════════════
     const fecha = new Date().toISOString().split('T')[0];
 
     const { data: cajaExistente, error: cajaError } = await supabase
@@ -267,16 +197,20 @@ const getPaymentHistory = async (req, res) => {
   return res.json(historial);
 };
 
+// ═══════════════════════════════════════════════════════════════
+//  🆕 GET ACTIVE LOANS  —  Modificado con cobrado_hoy + filtro cliente
+// ═══════════════════════════════════════════════════════════════
 const getActiveLoans = async (req, res) => {
   const supabase = getSupabase();
   const cobradorid = req.user.id;
   const rol = req.user.rol;
+  const clienteId = req.query.cliente_id; // 🆕 Filtro por cliente
 
   let query = supabase
     .from('prestamos')
     .select(`
       id, monto_prestado, monto_total, saldo_pendiente, cuota_diaria,
-      fecha_inicio, fecha_fin, estado, cobrador_id, frecuencia,
+      fecha_inicio, fecha_fin, estado, cobrador_id, frecuencia, cliente_id,
       usuarios!prestamos_cobrador_id_fkey(nombre),
       clientes(id, nombre, telefono, rutas(id, nombre))
     `)
@@ -284,9 +218,32 @@ const getActiveLoans = async (req, res) => {
     .order('fecha_inicio', { ascending: false });
 
   if (rol !== 'admin') query = query.eq('cobrador_id', cobradorid);
+  if (clienteId) query = query.eq('cliente_id', clienteId); // 🆕
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
+
+  // 🆕 Calcular cobrado_hoy
+  const fechaHoy = new Date().toISOString().split('T')[0];
+  const prestamoIds = (data ?? []).map(p => p.id);
+  
+  let pagosHoyPorPrestamo = {};
+  if (prestamoIds.length > 0) {
+    const { data: pagosData } = await supabase
+      .from('pagos')
+      .select('prestamo_id, monto_pagado')
+      .in('prestamo_id', prestamoIds)
+      .gte('fecha_pago', `${fechaHoy}T00:00:00`)
+      .lte('fecha_pago', `${fechaHoy}T23:59:59`);
+    
+    for (const p of (pagosData ?? [])) {
+      if (!pagosHoyPorPrestamo[p.prestamo_id]) {
+        pagosHoyPorPrestamo[p.prestamo_id] = { total: 0, cantidad: 0 };
+      }
+      pagosHoyPorPrestamo[p.prestamo_id].total += Number(p.monto_pagado || 0);
+      pagosHoyPorPrestamo[p.prestamo_id].cantidad += 1;
+    }
+  }
 
   const prestamos = (data ?? []).map((p) => ({
     ...p,
@@ -294,6 +251,12 @@ const getActiveLoans = async (req, res) => {
     clientenombre: p.clientes?.nombre ?? null,
     clientetelefono: p.clientes?.telefono ?? null,
     rutanombre: p.clientes?.rutas?.nombre ?? null,
+    clienteid: p.cliente_id,
+    frecuencia: p.frecuencia || 'diario',
+    // 🆕 CAMPOS NUEVOS
+    cobrado_hoy: pagosHoyPorPrestamo[p.id]?.total ?? 0,
+    cantidad_pagos_hoy: pagosHoyPorPrestamo[p.id]?.cantidad ?? 0,
+    ya_cobrado_hoy: (pagosHoyPorPrestamo[p.id]?.cantidad ?? 0) > 0,
   }));
 
   return res.json(prestamos);

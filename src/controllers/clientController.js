@@ -1,6 +1,12 @@
 // src/controllers/clientController.js
 const getSupabase = require('../config/supabaseClient');
 
+const toDateOnly = (value) => {
+  if (!value) return new Date().toISOString().split('T')[0];
+  if (typeof value === 'string' && value.length >= 10) return value.slice(0, 10);
+  return new Date(value).toISOString().split('T')[0];
+};
+
 const getClientes = async (req, res) => {
   const supabase = getSupabase();
   const rol = req.user.rol;
@@ -9,13 +15,12 @@ const getClientes = async (req, res) => {
     ? req.query.cobradorid
     : (req.query.cobradorid || usuarioid);
 
-  // Búsqueda por texto
   const search = (req.query.search || req.query.q || '').toString().trim();
+  const fechaHoy = toDateOnly();
 
   console.log('🔍 getClientes - search:', JSON.stringify(search), 'cobrador:', filtrocobrador);
 
   try {
-    // PASO 1: Búsqueda simple SIN joins (más confiable)
     let query = supabase
       .from('clientes')
       .select('id, nombre, telefono, direccion, informacion_contacto, created_at, cobrador_id, ruta_id')
@@ -41,7 +46,6 @@ const getClientes = async (req, res) => {
       return res.json([]);
     }
 
-    // PASO 2: Traer los nombres de cobradores MANUALMENTE
     const cobradoresIds = [...new Set(data.map(c => c.cobrador_id).filter(id => id != null))];
     let cobradoresMap = {};
     if (cobradoresIds.length > 0) {
@@ -54,7 +58,6 @@ const getClientes = async (req, res) => {
       }
     }
 
-    // PASO 3: Traer los nombres de rutas MANUALMENTE
     const rutasIds = [...new Set(data.map(c => c.ruta_id).filter(id => id != null))];
     let rutasMap = {};
     if (rutasIds.length > 0) {
@@ -67,13 +70,12 @@ const getClientes = async (req, res) => {
       }
     }
 
-    // PASO 4: Traer los préstamos de los clientes
     const clienteIds = data.map(c => c.id);
     let prestamosPorCliente = {};
     if (clienteIds.length > 0) {
       const { data: prestamosData } = await supabase
         .from('prestamos')
-        .select('id, estado, saldo_pendiente, monto_total, cliente_id')
+        .select('id, estado, saldo_pendiente, monto_total, cliente_id, cobrador_id')
         .in('cliente_id', clienteIds);
       
       for (const p of (prestamosData ?? [])) {
@@ -84,12 +86,41 @@ const getClientes = async (req, res) => {
       }
     }
 
-    // PASO 5: Armar respuesta
+    // 🆕 Calcular IDs de préstamos con cobros hoy
+    const todosPrestamosActivos = [];
+    for (const prestamos of Object.values(prestamosPorCliente)) {
+      for (const p of prestamos) {
+        if (p.estado === 'activo' || p.estado === 'mora') {
+          todosPrestamosActivos.push(p.id);
+        }
+      }
+    }
+
+    let prestamosConCobroHoy = new Set();
+    if (todosPrestamosActivos.length > 0) {
+      const { data: pagosHoyData } = await supabase
+        .from('pagos')
+        .select('prestamo_id')
+        .in('prestamo_id', todosPrestamosActivos)
+        .gte('fecha_pago', `${fechaHoy}T00:00:00`)
+        .lte('fecha_pago', `${fechaHoy}T23:59:59`);
+      
+      if (pagosHoyData) {
+        for (const pago of pagosHoyData) {
+          prestamosConCobroHoy.add(pago.prestamo_id);
+        }
+      }
+    }
+
     const clientes = data.map(c => {
       const prestamos = prestamosPorCliente[c.id] || [];
       const activos = prestamos.filter(p => p.estado === 'activo' || p.estado === 'mora');
       const saldopendiente = activos.reduce((sum, p) => sum + Number(p.saldo_pendiente || 0), 0);
       const tienemora = prestamos.some(p => p.estado === 'mora');
+      const tienecobroHoy = prestamos.some(p => 
+        (p.estado === 'activo' || p.estado === 'mora') && prestamosConCobroHoy.has(p.id)
+      );
+      
       return {
         id: c.id,
         nombre: c.nombre,
@@ -98,13 +129,15 @@ const getClientes = async (req, res) => {
         informacioncontacto: c.informacion_contacto,
         createdat: c.created_at,
         cobradorid: c.cobrador_id,
-        cobradornombre: cobradoresMap[c.cobrador_id] ?? 'Sin cobrador',  // 🆕 Ahora sí muestra el nombre
+        cobradornombre: cobradoresMap[c.cobrador_id] ?? 'Sin cobrador',
         rutaid: c.ruta_id,
         rutanombre: rutasMap[c.ruta_id] ?? 'Sin ruta',
         totalprestamos: prestamos.length,
         prestamosactivos: activos.length,
         saldopendiente,
         tienemora,
+        // 🆕 CAMPO NUEVO
+        cobrado_hoy: tienecobroHoy,
       };
     });
 
@@ -127,7 +160,6 @@ const getCobradores = async (req, res) => {
       .eq('rol', 'cobrador')
       .order('nombre');
 
-    // 🆕 Si hay búsqueda, filtrar
     if (search.length >= 2) {
       query = query.ilike('nombre', `%${search}%`);
     }

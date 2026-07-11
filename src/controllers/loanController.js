@@ -430,7 +430,7 @@ const getCalendarioPagos = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════
-//  🆕 BUSCAR PRÉSTAMOS - Esta es la función que faltaba
+//  🆕 BUSCAR PRÉSTAMOS - Devuelve objeto COMPLETO
 // ═══════════════════════════════════════════════════════════════════
 const buscarPrestamos = async (req, res) => {
   const supabase = getSupabase();
@@ -445,16 +445,13 @@ const buscarPrestamos = async (req, res) => {
   }
 
   try {
-    // PASO 1: Buscar IDs de clientes que coincidan
+    // PASO 1: Buscar clientes que coincidan
     const { data: clientesData, error: clientesError } = await supabase
       .from('clientes')
-      .select('id, nombre, telefono, ruta_id')
+      .select('id, nombre, telefono, direccion, ruta_id')
       .or(`nombre.ilike.%${query}%,telefono.ilike.%${query}%`);
 
-    if (clientesError) {
-      console.error('❌ Error buscando clientes:', clientesError);
-      throw clientesError;
-    }
+    if (clientesError) throw clientesError;
 
     const clienteIds = (clientesData ?? []).map(c => c.id);
     const clientesMap = {};
@@ -463,21 +460,15 @@ const buscarPrestamos = async (req, res) => {
     }
     console.log(`👥 Clientes encontrados: ${clienteIds.length}`);
 
-    // PASO 2: Buscar IDs de cobradores que coincidan (solo admin)
+    // PASO 2: Buscar cobradores (solo admin)
     let cobradorIds = [];
-    let cobradoresMap = {};
     if (rol === 'admin') {
       const { data: cobradoresData } = await supabase
         .from('usuarios')
         .select('id, nombre')
         .eq('rol', 'cobrador')
         .ilike('nombre', `%${query}%`);
-
       cobradorIds = (cobradoresData ?? []).map(c => c.id);
-      for (const c of (cobradoresData ?? [])) {
-        cobradoresMap[c.id] = c.nombre;
-      }
-      console.log(`🏍 Cobradores encontrados: ${cobradorIds.length}`);
     }
 
     // PASO 3: Construir query de préstamos
@@ -490,32 +481,26 @@ const buscarPrestamos = async (req, res) => {
     }
 
     if (orFilters.length === 0) {
-      console.log('⚠️ Sin coincidencias en clientes ni cobradores');
       return res.json([]);
     }
 
     let prestamosQuery = supabase
       .from('prestamos')
-      .select('id, monto_prestado, monto_total, saldo_pendiente, cuota_diaria, fecha_inicio, fecha_fin, estado, frecuencia, cobrador_id, cliente_id')
+      .select('*')
       .or(orFilters.join(','))
       .order('created_at', { ascending: false })
       .limit(20);
 
-    // Si no es admin, solo sus préstamos
     if (rol !== 'admin') {
       prestamosQuery = prestamosQuery.eq('cobrador_id', userId);
     }
 
     const { data: prestamosData, error: prestamosError } = await prestamosQuery;
-
-    if (prestamosError) {
-      console.error('❌ Error buscando préstamos:', prestamosError);
-      throw prestamosError;
-    }
+    if (prestamosError) throw prestamosError;
 
     console.log(`💼 Préstamos encontrados: ${prestamosData?.length ?? 0}`);
 
-    // PASO 4: Traer las rutas
+    // PASO 4: Traer rutas
     const rutaIds = [...new Set((clientesData ?? []).map(c => c.ruta_id).filter(id => id != null))];
     let rutasMap = {};
     if (rutaIds.length > 0) {
@@ -528,20 +513,82 @@ const buscarPrestamos = async (req, res) => {
       }
     }
 
+    // PASO 5: Traer nombres de cobradores
+    const todosCobradorIds = [...new Set((prestamosData ?? []).map(p => p.cobrador_id).filter(id => id != null))];
+    let cobradoresMap = {};
+    if (todosCobradorIds.length > 0) {
+      const { data: cobradoresData } = await supabase
+        .from('usuarios')
+        .select('id, nombre')
+        .in('id', todosCobradorIds);
+      for (const c of (cobradoresData ?? [])) {
+        cobradoresMap[c.id] = c.nombre;
+      }
+    }
+
+    // 🆕 Construir respuesta con estructura COMPLETA
     const prestamos = (prestamosData ?? []).map(p => {
       const cliente = clientesMap[p.cliente_id] || {};
+      const cobradorNombre = cobradoresMap[p.cobrador_id] || 'Sin cobrador';
+      const rutaNombre = cliente.ruta_id ? (rutasMap[cliente.ruta_id] || 'Sin ruta') : 'Sin ruta';
+
       return {
+        // IDs
         id: p.id,
         cliente_id: p.cliente_id,
-        cliente_nombre: cliente.nombre ?? 'Sin cliente',
-        cliente_telefono: cliente.telefono ?? '',
-        ruta_nombre: cliente.ruta_id ? (rutasMap[cliente.ruta_id] ?? 'Sin ruta') : 'Sin ruta',
-        cobrador_nombre: cobradoresMap[p.cobrador_id] ?? 'Cobrador',
+        cobrador_id: p.cobrador_id,
+
+        // Campos del préstamo (snake_case)
+        monto_prestado: Number(p.monto_prestado) || 0,
         monto_total: Number(p.monto_total) || 0,
         saldo_pendiente: Number(p.saldo_pendiente) || 0,
         cuota_diaria: Number(p.cuota_diaria) || 0,
-        estado: p.estado ?? 'activo',
-        frecuencia: p.frecuencia ?? 'diario',
+        fecha_inicio: p.fecha_inicio,
+        fecha_fin: p.fecha_fin,
+        estado: p.estado || 'activo',
+        frecuencia: p.frecuencia || 'diario',
+        total_pagos_programados: p.total_pagos_programados || 0,
+        pagos_realizados: p.pagos_realizados || 0,
+        created_at: p.created_at,
+
+        // Aliases (sin guiones bajos) para compatibilidad
+        montoprestado: Number(p.monto_prestado) || 0,
+        montototal: Number(p.monto_total) || 0,
+        saldopendiente: Number(p.saldo_pendiente) || 0,
+        saldorestante: Number(p.saldo_pendiente) || 0,
+        cuotadiaria: Number(p.cuota_diaria) || 0,
+        fechainicio: p.fecha_inicio,
+        fechafin: p.fecha_fin,
+
+        // Nombres planos
+        cliente_nombre: cliente.nombre || 'Sin cliente',
+        cliente_telefono: cliente.telefono || '',
+        cliente_direccion: cliente.direccion || '',
+        cobrador_nombre: cobradorNombre,
+        cobradornombre: cobradorNombre,
+        ruta_nombre: rutaNombre,
+        rutanombre: rutaNombre,
+        clientenombre: cliente.nombre || 'Sin cliente',
+        clientetelefono: cliente.telefono || '',
+
+        // 🆕 Objeto clientes COMPLETO (lo que necesita DetallePrestamoScreen)
+        clientes: {
+          id: cliente.id || p.cliente_id,
+          nombre: cliente.nombre || 'Sin cliente',
+          telefono: cliente.telefono || '',
+          direccion: cliente.direccion || '',
+          ruta_id: cliente.ruta_id || null,
+          rutas: cliente.ruta_id ? {
+            id: cliente.ruta_id,
+            nombre: rutaNombre,
+          } : null,
+        },
+
+        // 🆕 Objeto usuarios (cobrador)
+        usuarios: {
+          id: p.cobrador_id,
+          nombre: cobradorNombre,
+        },
       };
     });
 
@@ -552,9 +599,6 @@ const buscarPrestamos = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════════════════
-//  EXPORTAR
-// ═══════════════════════════════════════════════════════════════════
 module.exports = {
   createLoan,
   updateLoan,
@@ -562,5 +606,5 @@ module.exports = {
   importarPrestamos,
   getLoansByCobrador,
   getCalendarioPagos,
-  buscarPrestamos,  // 🆕 ESTA LÍNEA ES LA QUE FALTABA
+  buscarPrestamos,
 };
